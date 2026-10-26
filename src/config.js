@@ -18,6 +18,7 @@ function toBoolean(value, fallback) {
 
 function toArray(value, fallback = []) {
   if (value === undefined || value === null || value === '') return fallback;
+
   return String(value)
     .split(',')
     .map((item) => item.trim())
@@ -30,7 +31,12 @@ module.exports = {
   app: {
     port: toNumber(process.env.PORT, 3000),
     logLevel: process.env.LOG_LEVEL || 'info',
-    enableKeepalivePing: toBoolean(process.env.ENABLE_KEEPALIVE_PING, true),
+    enableKeepalivePing: toBoolean(process.env.ENABLE_KEEPALIVE_PING, true)
+  },
+
+  db: {
+    connectionString: process.env.DATABASE_URL || '',
+    ssl: process.env.NODE_ENV === 'production'
   },
 
   bybit: {
@@ -43,7 +49,7 @@ module.exports = {
     mainnet: toBoolean(process.env.MAINNET, true),
     restTimeoutMs: toNumber(process.env.BYBIT_REST_TIMEOUT_MS, 7000),
     paginationLimit: toNumber(process.env.BYBIT_PAGINATION_LIMIT, 500),
-    pageSize: toNumber(process.env.PAGE_SIZE, 50),
+    pageSize: toNumber(process.env.PAGE_SIZE, 50)
   },
 
   ws: {
@@ -57,7 +63,7 @@ module.exports = {
     reconnectDelayMs: toNumber(process.env.WS_RECONNECT_DELAY_MS, 800),
     reconnectBackoffFactor: toNumber(process.env.WS_RECONNECT_BACKOFF_FACTOR, 2),
     reconnectMaxMs: toNumber(process.env.WS_RECONNECT_MAX_MS, 24000),
-    maxReconnectAttempts: toNumber(process.env.WS_MAX_RECONNECT_ATTEMPTS, 8),
+    maxReconnectAttempts: toNumber(process.env.WS_MAX_RECONNECT_ATTEMPTS, 8)
   },
 
   data: {
@@ -65,11 +71,11 @@ module.exports = {
     seedConcurrency: toNumber(process.env.SEED_CONCURRENCY, 4),
     symbolSeedAll: toBoolean(process.env.SYMBOL_SEED_ALL, true),
     excludeStables: toArray(process.env.EXCLUDE_STABLES, ['USDT', 'USDC', 'TUSD', 'DAI']),
-    symbolFilter: process.env.SYMBOL_FILTER || '^[A-Z0-9]+USDT(\\.P)?$',
+    symbolFilter: process.env.SYMBOL_FILTER || '^[A-Z0-9]+USDT(\\.P)?$'
   },
 
   mtf: {
-    timeframes: toArray(process.env.MTF_TFS, ['5', '15', '60', '240', 'D']),
+    timeframes: toArray(process.env.MTF_TFS, ['5', '15', '60', '240', 'D'])
   },
 
   trading: {
@@ -83,7 +89,7 @@ module.exports = {
     slippagePercent: toNumber(process.env.SLIPPAGE_PERCENT, 0.1),
     minTvRating: toNumber(process.env.MIN_TV_RATING, 0.6),
     maxConsecutiveRootSignals1d: toNumber(process.env.MAX_CONSECUTIVE_ROOT_SIGNALS_1D, 2),
-    enableOpenTrades: toBoolean(process.env.ENABLE_OPEN_TRADES, false),
+    enableOpenTrades: toBoolean(process.env.ENABLE_OPEN_TRADES, false)
   },
 
   risk: {
@@ -92,7 +98,7 @@ module.exports = {
     breakEvenTrailing: toBoolean(process.env.BREAK_EVEN_TRAILING, false),
     breakEvenTriggerPercent: toNumber(process.env.BREAK_EVEN_TRIGGER_PERCENT, 1),
     breakEvenPercent: toNumber(process.env.BREAK_EVEN_PERCENT, 0.5),
-    trailingLookback: toNumber(process.env.TRAILING_LOOKBACK, 3),
+    trailingLookback: toNumber(process.env.TRAILING_LOOKBACK, 3)
   },
 
   telegram: {
@@ -100,21 +106,21 @@ module.exports = {
     chatId: process.env.TELEGRAM_CHAT_ID || '',
     sendDelayMs: toNumber(process.env.TELEGRAM_SEND_DELAY_MS, 250),
     pushFull: toBoolean(process.env.TELEGRAM_PUSH_FULL, false),
-    alignmentConfirmationAlert: toBoolean(process.env.ALIGNMENT_CONFIRMATION_ALERT, true),
+    alignmentConfirmationAlert: toBoolean(process.env.ALIGNMENT_CONFIRMATION_ALERT, true)
   },
 
   keepalive: {
     url: process.env.KEEPALIVE_URL || '',
-    intervalMs: toNumber(process.env.KEEPALIVE_INTERVAL_MS, 300000),
+    intervalMs: toNumber(process.env.KEEPALIVE_INTERVAL_MS, 300000)
   },
 
   closeLeastProfitable: {
     enabled: toBoolean(process.env.CLOSE_LEAST_PROFITABLE_ENABLED, false),
-    minsBeforeBoundary: toNumber(process.env.CLOSE_LEAST_PROFITABLE_MINS_BEFORE_BOUNDARY, 5),
+    minsBeforeBoundary: toNumber(process.env.CLOSE_LEAST_PROFITABLE_MINS_BEFORE_BOUNDARY, 5)
   },
 
   tradingview: {
     ratingEndpoint: process.env.TRADINGVIEW_RATING_ENDPOINT || '',
-    ratingEnabled: toBoolean(process.env.TRADINGVIEW_RATING_ENABLED, false),
-  },
+    ratingEnabled: toBoolean(process.env.TRADINGVIEW_RATING_ENABLED, false)
+  }
 };
