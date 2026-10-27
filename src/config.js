@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const parseList = (value, fallback = []) => {
   const source = value === undefined || value === null || value === ''
     ? fallback
