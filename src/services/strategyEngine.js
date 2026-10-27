@@ -5,7 +5,8 @@ const {
   upsertSymbol,
   saveKlines,
   getLatestCandles,
-  listOpenTrades
+  listOpenTrades,
+  saveKline
 } = require('../db');
 const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
 const { evaluateSignal } = require('./signalManager');
@@ -23,7 +24,7 @@ async function seedSymbols() {
 
   for (const symbol of filtered) {
     const base = symbol.replace(/USDT(\.P)?$/i, '');
-    upsertSymbol(symbol, base, 'USDT', 'active');
+    await upsertSymbol(symbol, base, 'USDT', 'active');
   }
 
   return filtered;
@@ -35,7 +36,7 @@ async function fetchCandlesForSymbol(symbol) {
 
   for (const tf of timeframes) {
     const candles = await fetchKlines(symbol, tf, 200);
-    saveKlines(symbol, tf, candles);
+    await saveKlines(symbol, tf, candles);
     byTf[tf] = candles;
   }
 
@@ -61,7 +62,7 @@ function normalizeWsCandle(payload) {
 async function evaluateAndSend(symbol) {
   const byTf = {};
   for (const tf of ['5', '15', '60', '240', 'D']) {
-    byTf[tf] = getLatestCandles(symbol, tf, 200);
+    byTf[tf] = await getLatestCandles(symbol, tf, 200);
   }
 
   const ticker = await fetchTicker(symbol);
@@ -119,12 +120,12 @@ async function evaluateAndSend(symbol) {
 }
 
 async function syncOpenTradesFromMarket() {
-  const openTrades = listOpenTrades();
+  const openTrades = await listOpenTrades();
 
   for (const trade of openTrades) {
     const candles = {};
     for (const tf of ['5', '15', '60', '240', 'D']) {
-      candles[tf] = getLatestCandles(trade.symbol, tf, 200);
+      candles[tf] = await getLatestCandles(trade.symbol, tf, 200);
     }
 
     const marketData = await buildMarketData(trade.symbol);
@@ -165,8 +166,7 @@ async function bootstrapStrategy() {
         volume: candle.volume
       };
 
-      const db = require('../db');
-      db.saveKline(symbol, tf, normalized);
+      await saveKline(symbol, tf, normalized);
 
       if (tf === 'D') {
         try {
@@ -213,7 +213,7 @@ async function bootstrapStrategy() {
 
         const byTf = {};
         for (const tf of ['5', '15', '60', '240', 'D']) {
-          byTf[tf] = getLatestCandles(symbol, tf, 200);
+          byTf[tf] = await getLatestCandles(symbol, tf, 200);
         }
 
         const ticker = await fetchTicker(symbol);
