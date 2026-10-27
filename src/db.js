@@ -14,7 +14,17 @@ async function query(text, params = []) {
   return pool.query(text, params);
 }
 
+async function testConnection() {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    console.log('PostgreSQL connected:', result.rows[0].now);
+  } catch (err) {
+    console.error('PostgreSQL connection failed:', err.message);
+  }
+}
+
 module.exports = {
   query,
-  pool
+  pool,
+  testConnection
 };
