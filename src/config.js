@@ -57,9 +57,8 @@ module.exports = {
   // ---------------------------
   // PostgreSQL / Render DB
   // ---------------------------
-  DATABASE_URL: envString('DATABASE_URL', ''),
-  DB_SSL: envBool('DB_SSL', true),
-
+  DATABASE_URL: process.env.DATABASE_URL || '',
+  DB_SSL: process.env.DB_SSL === 'true'
   // ---------------------------
   // Performance / speed tuning
   // ---------------------------
