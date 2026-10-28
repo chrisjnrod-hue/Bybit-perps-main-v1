@@ -3,7 +3,9 @@ const config = require('./config');
 
 const pool = new Pool({
   connectionString: config.DATABASE_URL,
-  ssl: config.DB_SSL ? { rejectUnauthorized: false } : false
+  ssl: config.DB_SSL === 'true' || config.DB_SSL === true
+    ? { rejectUnauthorized: false }
+    : false
 });
 
 pool.on('error', (err) => {
@@ -13,6 +15,11 @@ pool.on('error', (err) => {
 async function query(text, params = []) {
   return pool.query(text, params);
 }
+
+module.exports = {
+  query,
+  pool
+};
 
 async function upsertSymbol(symbol, base, quote, status = 'active') {
   await pool.query(
