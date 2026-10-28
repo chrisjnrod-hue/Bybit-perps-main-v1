@@ -46,22 +46,14 @@ function envString(name, defaultValue) {
 }
 
 module.exports = {
-  // ---------------------------
-  // Core exchange / API
-  // ---------------------------
   BYBIT_REST_BASE: envString('BYBIT_REST_BASE', 'https://api.bybit.com'),
   BYBIT_WS_PUBLIC: envString('BYBIT_WS_PUBLIC', 'wss://stream.bybit.com/v5/public/linear'),
   BYBIT_API_KEY: process.env.BYBIT_API_KEY || '',
   BYBIT_API_SECRET: process.env.BYBIT_API_SECRET || '',
 
-  // ---------------------------
-  // PostgreSQL / Render DB
-  // ---------------------------
   DATABASE_URL: process.env.DATABASE_URL || '',
-  DB_SSL: process.env.DB_SSL === 'true'
-  // ---------------------------
-  // Performance / speed tuning
-  // ---------------------------
+  DB_SSL: process.env.DB_SSL === 'true',
+
   USE_WS: envBool('USE_WS', true),
   SYMBOL_SEED_ALL: envBool('SYMBOL_SEED_ALL', true),
 
@@ -84,20 +76,11 @@ module.exports = {
   SEED_CONCURRENCY: envInt('SEED_CONCURRENCY', 4),
   PAGE_SIZE: envInt('PAGE_SIZE', 50),
 
-  // ---------------------------
-  // Symbol filters
-  // ---------------------------
   EXCLUDE_STABLES: parseList(process.env.EXCLUDE_STABLES, ['USDT', 'USDC', 'TUSD', 'DAI']),
   SYMBOL_FILTER: envString('SYMBOL_FILTER', '^[A-Z0-9]+USDT(\\.P)?$'),
 
-  // ---------------------------
-  // Root / MTF scan config
-  // ---------------------------
   MTF_TFS: parseList(process.env.MTF_TFS, ['15', '60', '240', 'D']),
 
-  // ---------------------------
-  // Trade settings
-  // ---------------------------
   DEFAULT_ACCOUNT_EQUITY_USD: envFloat('DEFAULT_ACCOUNT_EQUITY_USD', 10000),
   TARGET_POSITION_FRAC: envFloat('TARGET_POSITION_FRAC', 0.01),
 
@@ -116,15 +99,9 @@ module.exports = {
   BREAK_EVEN_PERCENT: envFloat('BREAK_EVEN_PERCENT', 0.5),
   TRAILING_LOOKBACK: envInt('TRAILING_LOOKBACK', 3),
 
-  // ---------------------------
-  // Signal gating / quality
-  // ---------------------------
   MIN_TV_RATING: envFloat('MIN_TV_RATING', 0.6),
   MAX_CONSECUTIVE_ROOT_SIGNALS_1D: envInt('MAX_CONSECUTIVE_ROOT_SIGNALS_1D', 2),
 
-  // ---------------------------
-  // Telegram / notifications
-  // ---------------------------
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || '',
 
@@ -133,9 +110,6 @@ module.exports = {
 
   ALIGNMENT_CONFIRMATION_ALERT: envBool('ALIGNMENT_CONFIRMATION_ALERT', true),
 
-  // ---------------------------
-  // DB / runtime / health
-  // ---------------------------
   PORT: envInt('PORT', 3000),
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 
@@ -146,16 +120,11 @@ module.exports = {
   CLOSE_LEAST_PROFITABLE_ENABLED: envBool('CLOSE_LEAST_PROFITABLE_ENABLED', false),
   CLOSE_LEAST_PROFITABLE_MINS_BEFORE_BOUNDARY: envInt('CLOSE_LEAST_PROFITABLE_MINS_BEFORE_BOUNDARY', 5),
 
-  // ---------------------------
-  // Optional / compatibility
-  // ---------------------------
   BYBIT_REST_BASES: parseList(process.env.BYBIT_REST_BASES, ['https://api.bybit.com']),
   BYBIT_ORDER_BASE: process.env.BYBIT_ORDER_BASE || '',
   MAINNET: envBool('MAINNET', true),
   BYBIT_USE_TESTNET: envBool('BYBIT_USE_TESTNET', false),
 
   ENABLE_OPEN_TRADES: envBool('ENABLE_OPEN_TRADES', false),
-
-  // Safety no-op placeholders
   BYBIT_REST_TIMEOUT_MS: envInt('BYBIT_REST_TIMEOUT_MS', 7000),
 };
