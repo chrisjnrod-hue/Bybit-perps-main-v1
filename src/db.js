@@ -111,6 +111,44 @@ async function recordSignal(signal) {
   );
 }
 
+// --- Added MTF State & Event Functions ---
+
+async function getMtfState(symbol, timeframe) {
+  const result = await pool.query(
+    `
+    SELECT *
+    FROM mtf_state
+    WHERE symbol = $1 AND timeframe = $2
+    `,
+    [symbol, timeframe]
+  );
+  return result.rows[0] || null;
+}
+
+async function saveMtfState(symbol, timeframe, state) {
+  await pool.query(
+    `
+    INSERT INTO mtf_state (symbol, timeframe, state, last_updated)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (symbol) DO UPDATE SET
+      timeframe = EXCLUDED.timeframe,
+      state = EXCLUDED.state,
+      last_updated = EXCLUDED.last_updated
+    `,
+    [symbol, timeframe, state, Date.now()]
+  );
+}
+
+async function recordMtfEvent(symbol, timeframe, previousState, currentState) {
+  await pool.query(
+    `
+    INSERT INTO mtf_events (symbol, timeframe, previous_state, current_state, event_time)
+    VALUES ($1, $2, $3, $4, $5)
+    `,
+    [symbol, timeframe, previousState || 'none', currentState, Date.now()]
+  );
+}
+
 module.exports = {
   query,
   pool,
@@ -119,5 +157,8 @@ module.exports = {
   saveKlines,
   getLatestCandles,
   listOpenTrades,
-  recordSignal
+  recordSignal,
+  getMtfState,
+  saveMtfState,
+  recordMtfEvent
 };
