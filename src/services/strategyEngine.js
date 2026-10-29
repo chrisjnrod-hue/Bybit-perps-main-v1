@@ -6,7 +6,8 @@ const {
   saveKlines,
   getLatestCandles,
   listOpenTrades,
-  saveKline
+  saveKline,
+  recordSignal
 } = require('../db');
 const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
 const { evaluateSignal } = require('./signalManager');
@@ -71,6 +72,9 @@ async function evaluateAndSend(symbol) {
   const signal = await evaluateSignal(symbol, byTf, { ...ticker, ...marketData });
 
   if (!signal) return null;
+
+  // Save the evaluated signal to PostgreSQL
+  await recordSignal(signal);
 
   const tradeCheck = shouldOpenTrade(signal, {
     volume24hUsd: Number(marketData.volume24hUsd || 0),
@@ -193,6 +197,7 @@ async function bootstrapStrategy() {
       const marketData = await buildMarketData(symbol);
       const signal = await evaluateSignal(symbol, candleMap, { ...ticker, ...marketData });
       if (signal) {
+        await recordSignal(signal); // Save initial scan signals to DB
         allSignals.push(signal);
       }
     } catch (err) {
@@ -221,6 +226,8 @@ async function bootstrapStrategy() {
         const signal = await evaluateSignal(symbol, byTf, { ...ticker, ...marketData });
 
         if (!signal) continue;
+
+        await recordSignal(signal); // Save periodic scan signals to DB
 
         if (signal.decision === 'accept') {
           const tradeCheck = shouldOpenTrade(signal, {
