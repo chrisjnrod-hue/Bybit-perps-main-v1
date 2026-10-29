@@ -111,8 +111,6 @@ async function recordSignal(signal) {
   );
 }
 
-// --- Added MTF State & Event Functions ---
-
 async function getMtfState(symbol, timeframe) {
   const result = await pool.query(
     `
@@ -139,6 +137,11 @@ async function saveMtfState(symbol, timeframe, state) {
   );
 }
 
+// Alias to support calls expecting setMtfState
+async function setMtfState(symbol, timeframe, state) {
+  return saveMtfState(symbol, timeframe, state);
+}
+
 async function recordMtfEvent(symbol, timeframe, previousState, currentState) {
   await pool.query(
     `
@@ -160,5 +163,6 @@ module.exports = {
   recordSignal,
   getMtfState,
   saveMtfState,
+  setMtfState,
   recordMtfEvent
 };
