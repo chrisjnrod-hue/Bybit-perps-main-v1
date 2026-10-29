@@ -92,6 +92,29 @@ async function listOpenTrades() {
   return result.rows;
 }
 
+async function saveOpenTrade(trade) {
+  const result = await pool.query(
+    `
+    INSERT INTO open_trades (symbol, side, status, entry_price, stop_loss, take_profit, trailing_stop, score, created_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    RETURNING *
+    `,
+    [
+      trade.symbol,
+      trade.side || 'buy',
+      trade.status || 'open',
+      Number(trade.entryPrice || trade.entry_price || 0),
+      Number(trade.stopLoss || trade.stop_loss || 0),
+      Number(trade.takeProfit || trade.take_profit || 0),
+      Number(trade.trailingStop || trade.trailing_stop || 0),
+      Number(trade.score || 0),
+      Date.now(),
+      Date.now()
+    ]
+  );
+  return result.rows[0];
+}
+
 async function recordSignal(signal) {
   await pool.query(
     `
@@ -137,7 +160,6 @@ async function saveMtfState(symbol, timeframe, state) {
   );
 }
 
-// Alias to support calls expecting setMtfState
 async function setMtfState(symbol, timeframe, state) {
   return saveMtfState(symbol, timeframe, state);
 }
@@ -160,6 +182,7 @@ module.exports = {
   saveKlines,
   getLatestCandles,
   listOpenTrades,
+  saveOpenTrade,
   recordSignal,
   getMtfState,
   saveMtfState,
