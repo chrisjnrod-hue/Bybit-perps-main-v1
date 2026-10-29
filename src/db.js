@@ -3,11 +3,10 @@ const config = require('./config');
 
 const pool = new Pool({
   connectionString: config.DATABASE_URL,
-  ssl: config.DB_SSL === 'true' || config.DB_SSL === true
+  ssl: config.DB_SSL
     ? { rejectUnauthorized: false }
     : false
 });
-
 pool.on('error', (err) => {
   console.error('Unexpected PostgreSQL pool error:', err);
 });
