@@ -44,8 +44,16 @@ function normalizeUsdtSymbol(symbol) {
   if (!symbol) return null;
   const s = String(symbol).trim().toUpperCase();
   if (!s) return null;
+  
+  // Filter out delivery contracts or quarterly futures if any slip through
   if (/USDT[QHUZ0-9]/.test(s.slice(-6))) return null;
+  
+  // Must end with USDT or USDT.P
   if (!/USDT(\.P)?$/.test(s)) return null;
+
+  // Skip symbols starting with numbers (e.g. 0GUSDT, 10000NEXUSDT) to prevent 400 Bad Request errors[cite: 1]
+  if (/^[0-9]/.test(s)) return null;
+
   return s;
 }
 
