@@ -11,7 +11,7 @@ const rateLimiter = {
   intervalMs: Math.max(50, Number(config.BYBIT_FETCH_RATE_LIMIT_MS || 250))
 };
 
-async function withRateLimit(fn) {
+async function waitForRateLimit() {
   const now = Date.now();
   const elapsed = now - rateLimiter.lastCallAt;
   const wait = Math.max(0, rateLimiter.intervalMs - elapsed);
@@ -21,7 +21,28 @@ async function withRateLimit(fn) {
   }
 
   rateLimiter.lastCallAt = Date.now();
-  return fn();
+}
+
+async function safeBybitRequest(fn, context = 'request') {
+  try {
+    await waitForRateLimit();
+    return await fn();
+  } catch (err) {
+    const status = err?.response?.status;
+    const data = err?.response?.data;
+
+    if (status === 400 || status === 404) {
+      console.warn(`[Bybit ${context}] skipped due to ${status}:`, data || err.message);
+      return null;
+    }
+
+    if (status === 429) {
+      console.warn(`[Bybit ${context}] rate limited. Retrying later...`);
+      return null;
+    }
+
+    throw err;
+  }
 }
 
 function normalizeUsdtSymbol(symbol) {
@@ -38,16 +59,24 @@ async function fetchAllSymbols() {
   let cursor = null;
 
   while (true) {
-    const res = await withRateLimit(() =>
-      client.get('/v5/market/instruments-info', {
-        params: {
-          category: 'linear',
-          status: 'Trading',
-          limit: 1000,
-          ...(cursor ? { cursor } : {})
-        }
-      })
+    const res = await safeBybitRequest(
+      () =>
+        client.get('/v5/market/instruments-info', {
+          params: {
+            category: 'linear',
+            status: 'Trading',
+            limit: 1000,
+            ...(cursor ? { cursor } : {})
+          }
+        }),
+      'fetchAllSymbols'
     );
+
+    if (!res) {
+      if (!cursor) break;
+      cursor = null;
+      continue;
+    }
 
     const page = res?.data?.result?.list || [];
     for (const item of page) {
@@ -74,16 +103,20 @@ async function fetchAllSymbols() {
 }
 
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
-  const res = await withRateLimit(() =>
-    client.get('/v5/market/kline', {
-      params: {
-        category: 'linear',
-        symbol,
-        interval,
-        limit
-      }
-    })
+  const res = await safeBybitRequest(
+    () =>
+      client.get('/v5/market/kline', {
+        params: {
+          category: 'linear',
+          symbol,
+          interval,
+          limit
+        }
+      }),
+    `fetchKlines:${symbol}:${interval}`
   );
+
+  if (!res) return [];
 
   const rows = res?.data?.result?.list || [];
   return rows.map((row) => ({
@@ -97,29 +130,42 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
 }
 
 async function fetchTicker(symbol) {
-  const res = await withRateLimit(() =>
-    client.get('/v5/market/tickers', {
-      params: {
-        category: 'linear',
-        symbol
-      }
-    })
+  const res = await safeBybitRequest(
+    () =>
+      client.get('/v5/market/tickers', {
+        params: {
+          category: 'linear',
+          symbol
+        }
+      }),
+    `fetchTicker:${symbol}`
   );
+
+  if (!res) return null;
 
   const list = res?.data?.result?.list || [];
   return list[0] || null;
 }
 
 async function fetchOrderBook(symbol, limit = 25) {
-  const res = await withRateLimit(() =>
-    client.get('/v5/market/orderbook', {
-      params: {
-        category: 'linear',
-        symbol,
-        limit
-      }
-    })
+  const res = await safeBybitRequest(
+    () =>
+      client.get('/v5/market/orderbook', {
+        params: {
+          category: 'linear',
+          symbol,
+          limit
+        }
+      }),
+    `fetchOrderBook:${symbol}`
   );
+
+  if (!res) {
+    return {
+      bids: [],
+      asks: []
+    };
+  }
 
   const result = res?.data?.result || {};
   return {
@@ -129,15 +175,19 @@ async function fetchOrderBook(symbol, limit = 25) {
 }
 
 async function fetchFundingRate(symbol) {
-  const res = await withRateLimit(() =>
-    client.get('/v5/market/funding/history', {
-      params: {
-        category: 'linear',
-        symbol,
-        limit: 1
-      }
-    })
+  const res = await safeBybitRequest(
+    () =>
+      client.get('/v5/market/funding/history', {
+        params: {
+          category: 'linear',
+          symbol,
+          limit: 1
+        }
+      }),
+    `fetchFundingRate:${symbol}`
   );
+
+  if (!res) return null;
 
   const list = res?.data?.result?.list || [];
   return list[0] || null;
