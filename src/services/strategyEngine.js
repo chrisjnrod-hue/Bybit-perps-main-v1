@@ -8,7 +8,6 @@ const {
   getLatestCandles,
   listOpenTrades,
   saveKline,
-  recordSignal,
   query
 } = require('../db');
 const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
@@ -97,7 +96,6 @@ async function evaluateAndSendBoundary(symbol) {
 
   if (!signal) return null;
 
-  // Send single boundary update block for newly surfaced signal
   await sendTelegramMessage(formatSignalBlock({
     symbol: signal.symbol,
     time: new Date().toISOString(),
@@ -129,7 +127,6 @@ async function bootstrapStrategy() {
     return;
   }
 
-  // Schedule daily 24h cache cleanup
   setInterval(performDailyCleanup, 24 * 60 * 60 * 1000);
 
   if (config.USE_WS) {
@@ -145,7 +142,6 @@ async function bootstrapStrategy() {
 
       await saveKline(symbol, tf, candle);
 
-      // On 1D candle boundary open
       if (tf === 'D') {
         try {
           await performDailyCleanup();
@@ -172,6 +168,9 @@ async function bootstrapStrategy() {
 
   for (const symbol of symbols) {
     try {
+      // Add a 100ms throttle delay to avoid Bybit HTTP 400 rate limits
+      await new Promise(r => setTimeout(r, 100));
+
       const candleMap = await fetchCandlesForSymbol(symbol);
       const ticker = await fetchTicker(symbol);
       const marketData = await buildMarketData(symbol);
@@ -180,7 +179,6 @@ async function bootstrapStrategy() {
       if (signal) {
         allSignals.push(signal);
 
-        // Send individual signal blocks
         await sendTelegramMessage(formatSignalBlock({
           symbol: signal.symbol,
           time: new Date().toISOString(),
@@ -199,7 +197,6 @@ async function bootstrapStrategy() {
           action: signal.decision === 'accept' ? 'open' : 'monitor'
         }));
 
-        // Send recommended trade block if accepted & within MAX_OPEN_TRADES limit
         if (signal.decision === 'accept' && recommendedCount < maxTrades) {
           const tradeCheck = shouldOpenTrade(signal, {
             volume24hUsd: Number(marketData.volume24hUsd || 0),
@@ -236,7 +233,6 @@ async function bootstrapStrategy() {
     }
   }
 
-  // Send A-Z Summary block
   if (allSignals.length) {
     await sendTelegramMessage(formatSummaryTelegram(allSignals));
   }
@@ -247,6 +243,8 @@ async function bootstrapStrategy() {
       const activeSymbols = await seedSymbols();
 
       for (const symbol of activeSymbols) {
+        await new Promise(r => setTimeout(r, 100));
+
         const byTf = {};
         for (const tf of ['5', '15', '60', '240', 'D']) {
           byTf[tf] = await getLatestCandles(symbol, tf, 200);
@@ -258,7 +256,6 @@ async function bootstrapStrategy() {
 
         if (!signal || signal.decision !== 'accept') continue;
 
-        // Check if trade already exists or should be opened
         const tradeCheck = shouldOpenTrade(signal, {
           volume24hUsd: Number(marketData.volume24hUsd || 0),
           spreadPct: Number(marketData.spreadPct || 0),
@@ -274,7 +271,6 @@ async function bootstrapStrategy() {
 
           ensureTradeFromSignal(signal, plan);
 
-          // Boundary scan sends ONE single signal update block per new surface
           await sendTelegramMessage(formatSignalBlock({
             symbol: signal.symbol,
             time: new Date().toISOString(),
