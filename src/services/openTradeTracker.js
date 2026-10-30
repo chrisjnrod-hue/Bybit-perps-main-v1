@@ -1,7 +1,19 @@
-const { listOpenTrades, saveOpenTrade, updateOpenTradeStatus } = require('../db');
+const {
+  listOpenTrades,
+  saveOpenTrade,
+  updateOpenTradeStatus,
+  getOpenTradeBySymbol,
+  countOpenTrades
+} = require('../db');
 const { evaluateTrailingStop } = require('./trailingStopEngine');
 
-function ensureTradeFromSignal(signal, plan) {
+async function ensureTradeFromSignal(signal, plan) {
+  const existing = await getOpenTradeBySymbol(signal.symbol);
+
+  if (existing && existing.status === 'open') {
+    return existing;
+  }
+
   const trade = {
     symbol: signal.symbol,
     side: plan.side || 'long',
@@ -13,15 +25,15 @@ function ensureTradeFromSignal(signal, plan) {
     score: Number(signal.customScore || 0)
   };
 
-  saveOpenTrade(trade);
-
-  return trade;
+  const saved = await saveOpenTrade(trade);
+  return saved;
 }
 
-function updateTradeFromMarket(symbol, currentPrice, candles) {
-  const trades = listOpenTrades().filter((trade) => trade.symbol === symbol);
+async function updateTradeFromMarket(symbol, currentPrice, candles) {
+  const trades = await listOpenTrades();
+  const filtered = trades.filter((trade) => trade.symbol === symbol);
 
-  for (const trade of trades) {
+  for (const trade of filtered) {
     const result = evaluateTrailingStop({
       symbol,
       side: trade.side || 'long',
@@ -34,7 +46,7 @@ function updateTradeFromMarket(symbol, currentPrice, candles) {
     });
 
     if (result.shouldExit) {
-      updateOpenTradeStatus(symbol, 'closed', result.reason);
+      await updateOpenTradeStatus(symbol, 'closed');
       continue;
     }
 
@@ -44,12 +56,14 @@ function updateTradeFromMarket(symbol, currentPrice, candles) {
         trailing_stop: Number(result.stopLoss),
         stop_loss: Number(result.stopLoss),
       };
-      saveOpenTrade(tradeToSave);
+
+      await saveOpenTrade(tradeToSave);
     }
   }
 }
 
 module.exports = {
   ensureTradeFromSignal,
-  updateTradeFromMarket
+  updateTradeFromMarket,
+  countOpenTrades
 };
