@@ -6,6 +6,24 @@ const client = axios.create({
   timeout: config.BYBIT_REST_TIMEOUT_MS || 7000
 });
 
+const rateLimiter = {
+  lastCallAt: 0,
+  intervalMs: Math.max(50, Number(config.BYBIT_FETCH_RATE_LIMIT_MS || 250))
+};
+
+async function withRateLimit(fn) {
+  const now = Date.now();
+  const elapsed = now - rateLimiter.lastCallAt;
+  const wait = Math.max(0, rateLimiter.intervalMs - elapsed);
+
+  if (wait > 0) {
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+
+  rateLimiter.lastCallAt = Date.now();
+  return fn();
+}
+
 function normalizeUsdtSymbol(symbol) {
   if (!symbol) return null;
   const s = String(symbol).trim().toUpperCase();
@@ -20,14 +38,16 @@ async function fetchAllSymbols() {
   let cursor = null;
 
   while (true) {
-    const res = await client.get('/v5/market/instruments-info', {
-      params: {
-        category: 'linear',
-        status: 'Trading',
-        limit: 1000,
-        ...(cursor ? { cursor } : {})
-      }
-    });
+    const res = await withRateLimit(() =>
+      client.get('/v5/market/instruments-info', {
+        params: {
+          category: 'linear',
+          status: 'Trading',
+          limit: 1000,
+          ...(cursor ? { cursor } : {})
+        }
+      })
+    );
 
     const page = res?.data?.result?.list || [];
     for (const item of page) {
@@ -54,14 +74,16 @@ async function fetchAllSymbols() {
 }
 
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
-  const res = await client.get('/v5/market/kline', {
-    params: {
-      category: 'linear',
-      symbol,
-      interval,
-      limit
-    }
-  });
+  const res = await withRateLimit(() =>
+    client.get('/v5/market/kline', {
+      params: {
+        category: 'linear',
+        symbol,
+        interval,
+        limit
+      }
+    })
+  );
 
   const rows = res?.data?.result?.list || [];
   return rows.map((row) => ({
@@ -75,25 +97,29 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
 }
 
 async function fetchTicker(symbol) {
-  const res = await client.get('/v5/market/tickers', {
-    params: {
-      category: 'linear',
-      symbol
-    }
-  });
+  const res = await withRateLimit(() =>
+    client.get('/v5/market/tickers', {
+      params: {
+        category: 'linear',
+        symbol
+      }
+    })
+  );
 
   const list = res?.data?.result?.list || [];
   return list[0] || null;
 }
 
 async function fetchOrderBook(symbol, limit = 25) {
-  const res = await client.get('/v5/market/orderbook', {
-    params: {
-      category: 'linear',
-      symbol,
-      limit
-    }
-  });
+  const res = await withRateLimit(() =>
+    client.get('/v5/market/orderbook', {
+      params: {
+        category: 'linear',
+        symbol,
+        limit
+      }
+    })
+  );
 
   const result = res?.data?.result || {};
   return {
@@ -103,13 +129,15 @@ async function fetchOrderBook(symbol, limit = 25) {
 }
 
 async function fetchFundingRate(symbol) {
-  const res = await client.get('/v5/market/funding/history', {
-    params: {
-      category: 'linear',
-      symbol,
-      limit: 1
-    }
-  });
+  const res = await withRateLimit(() =>
+    client.get('/v5/market/funding/history', {
+      params: {
+        category: 'linear',
+        symbol,
+        limit: 1
+      }
+    })
+  );
 
   const list = res?.data?.result?.list || [];
   return list[0] || null;
