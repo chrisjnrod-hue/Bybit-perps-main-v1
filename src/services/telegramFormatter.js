@@ -9,26 +9,37 @@ function formatSummaryTelegram(signals) {
 }
 
 function formatRecommendationTelegram(item) {
+  // Format MTF timeframe breakdown values (e.g. 5: ✓, 15: ✗)
+  const mtfValues = item.mtfValues || {};
+  const tfString = Object.entries(mtfValues)
+    .map(([tf, status]) => `${tf}m: ${status === 'bullish' ? '✓' : '✗'}`)
+    .join(' | ');
+
   return [
-    `Recommended trade: ${item.symbol}`,
+    `🎯 **Recommended Trade: ${item.symbol}**`,
     `Action: ${item.action}`,
     `Custom Score: ${item.customScore}`,
     `TV Score: ${item.tvScore}`,
-    `MTF: ${item.mtfStatus}`,
+    `MTF Status: ${item.mtfStatus} [${tfString}]`,
     `Liquidity: ${item.liquidity}`,
     `Reason: ${item.reason}`
   ].join('\n');
 }
 
 function formatSignalBlock(signal) {
+  const mtfValues = signal.mtfValues || {};
+  const tfString = Object.entries(mtfValues)
+    .map(([tf, status]) => `${tf}m: ${status === 'bullish' ? '✓' : '✗'}`)
+    .join(' | ');
+
   return [
-    `Signal: ${signal.symbol}`,
+    `📊 **Signal Update: ${signal.symbol}**`,
     `Time: ${signal.time}`,
     `Decision: ${signal.decision}`,
     `Reason: ${signal.reason}`,
     `Custom score: ${signal.customScore}`,
     `TV score: ${signal.tvScore}`,
-    `MTF status: ${signal.mtfStatus}`,
+    `MTF status: ${signal.mtfStatus} [${tfString}]`,
     `Price: ${signal.price}`,
     `Volume 24h: ${signal.volume24h}`,
     `Spread: ${signal.spreadPct}`,
