@@ -1,4 +1,5 @@
 const config = require('../config');
+const axios = require('axios');
 const { fetchAllSymbols, fetchKlines, fetchTicker } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
 const {
@@ -7,7 +8,7 @@ const {
   getLatestCandles,
   listOpenTrades,
   saveKline,
-  recordSignal
+  query
 } = require('../db');
 const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
 const { evaluateSignal } = require('./signalManager');
@@ -46,7 +47,6 @@ async function fetchCandlesForSymbol(symbol) {
 
 function normalizeWsCandle(payload) {
   if (!payload) return null;
-
   const kline = payload?.data?.[0] || payload?.data || payload;
   if (!kline) return null;
 
@@ -60,7 +60,31 @@ function normalizeWsCandle(payload) {
   };
 }
 
-async function evaluateAndSend(symbol) {
+// Prune stale klines / data older than 24h before new 1D candle boundary
+async function performDailyCleanup() {
+  try {
+    const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+    await query(`DELETE FROM klines WHERE open_time < $1 AND timeframe != 'D'`, [cutoff]);
+    console.log('Daily cache cleanup completed successfully.');
+  } catch (err) {
+    console.error('Daily cleanup failed:', err.message);
+  }
+}
+
+// Keep-alive ping handler
+function setupKeepAlive() {
+  if (!config.ENABLE_KEEPALIVE_PING || !config.KEEPALIVE_URL) return;
+  setInterval(async () => {
+    try {
+      await axios.get(config.KEEPALIVE_URL);
+      console.log('Keep-alive ping sent successfully.');
+    } catch (err) {
+      console.error('Keep-alive ping failed:', err.message);
+    }
+  }, config.KEEPALIVE_INTERVAL_MS || 300000);
+}
+
+async function evaluateAndSendBoundary(symbol) {
   const byTf = {};
   for (const tf of ['5', '15', '60', '240', 'D']) {
     byTf[tf] = await getLatestCandles(symbol, tf, 200);
@@ -68,40 +92,9 @@ async function evaluateAndSend(symbol) {
 
   const ticker = await fetchTicker(symbol);
   const marketData = await buildMarketData(symbol);
-
   const signal = await evaluateSignal(symbol, byTf, { ...ticker, ...marketData });
 
   if (!signal) return null;
-
-  // Save the evaluated signal to PostgreSQL
-  await recordSignal(signal);
-
-  const tradeCheck = shouldOpenTrade(signal, {
-    volume24hUsd: Number(marketData.volume24hUsd || 0),
-    spreadPct: Number(marketData.spreadPct || 0),
-    topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-  });
-
-  if (signal.decision === 'accept' && tradeCheck.open) {
-    const plan = buildTradePlan(signal, {
-      volume24hUsd: Number(marketData.volume24hUsd || 0),
-      spreadPct: Number(marketData.spreadPct || 0),
-      topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-    });
-
-    ensureTradeFromSignal(signal, plan);
-
-    await sendTelegramMessage(formatRecommendationTelegram({
-      symbol,
-      action: 'open',
-      customScore: signal.customScore,
-      tvScore: signal.tvScore,
-      mtfStatus: signal.mtfStatus,
-      liquidity: 'valid',
-      reason: signal.reason,
-      plan
-    }));
-  }
 
   await sendTelegramMessage(formatSignalBlock({
     symbol: signal.symbol,
@@ -111,6 +104,7 @@ async function evaluateAndSend(symbol) {
     customScore: signal.customScore,
     tvScore: signal.tvScore,
     mtfStatus: signal.mtfStatus,
+    mtfValues: signal.mtfValues,
     price: signal.price,
     volume24h: Number(marketData.volume24hUsd || 0),
     spreadPct: Number(marketData.spreadPct || 0),
@@ -121,6 +115,187 @@ async function evaluateAndSend(symbol) {
   }));
 
   return signal;
+}
+
+async function bootstrapStrategy() {
+  console.log('Bootstrapping strategy');
+  setupKeepAlive();
+
+  const symbols = await seedSymbols();
+  if (!symbols.length) {
+    console.log('No symbols loaded');
+    return;
+  }
+
+  setInterval(performDailyCleanup, 24 * 60 * 60 * 1000);
+
+  if (config.USE_WS) {
+    bybitWs.connect();
+
+    bybitWs.on('kline', async (msg) => {
+      const topic = msg?.topic || '';
+      const symbol = String(topic).split('.').slice(2).join('.');
+      const tf = String(topic).split('.')[1] || 'D';
+
+      const candle = normalizeWsCandle(msg);
+      if (!candle || !symbol || !tf) return;
+
+      await saveKline(symbol, tf, candle);
+
+      if (tf === 'D') {
+        try {
+          await performDailyCleanup();
+          await evaluateAndSendBoundary(symbol);
+          await syncOpenTradesFromMarket();
+        } catch (err) {
+          console.error('WS boundary evaluation failed for', symbol, err.message);
+        }
+      }
+    });
+
+    if (!wsBootstrapped) {
+      bybitWs.subscribe(symbols, ['5', '15', '60', '240', 'D']);
+      wsBootstrapped = true;
+    }
+  }
+
+  // --- INITIAL 1D CANDLE OPEN SCAN (FULL A-Z) ---
+  const allSignals = [];
+  const maxTrades = Number(config.MAX_OPEN_TRADES || 3);
+  let recommendedCount = 0;
+
+  console.log(`Starting full A-Z scan across ${symbols.length} symbols...`);
+
+  for (const symbol of symbols) {
+    try {
+      // Add a 100ms throttle delay to avoid Bybit HTTP 400 rate limits
+      await new Promise(r => setTimeout(r, 100));
+
+      const candleMap = await fetchCandlesForSymbol(symbol);
+      const ticker = await fetchTicker(symbol);
+      const marketData = await buildMarketData(symbol);
+      const signal = await evaluateSignal(symbol, candleMap, { ...ticker, ...marketData });
+      
+      if (signal) {
+        allSignals.push(signal);
+
+        await sendTelegramMessage(formatSignalBlock({
+          symbol: signal.symbol,
+          time: new Date().toISOString(),
+          decision: signal.decision,
+          reason: signal.reason,
+          customScore: signal.customScore,
+          tvScore: signal.tvScore,
+          mtfStatus: signal.mtfStatus,
+          mtfValues: signal.mtfValues,
+          price: signal.price,
+          volume24h: Number(marketData.volume24hUsd || 0),
+          spreadPct: Number(marketData.spreadPct || 0),
+          liquidity: 'valid',
+          trailingStop: 'higher_lows or close below 14MA',
+          takeProfit: '3%',
+          action: signal.decision === 'accept' ? 'open' : 'monitor'
+        }));
+
+        if (signal.decision === 'accept' && recommendedCount < maxTrades) {
+          const tradeCheck = shouldOpenTrade(signal, {
+            volume24hUsd: Number(marketData.volume24hUsd || 0),
+            spreadPct: Number(marketData.spreadPct || 0),
+            topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
+          });
+
+          if (tradeCheck.open) {
+            const plan = buildTradePlan(signal, {
+              volume24hUsd: Number(marketData.volume24hUsd || 0),
+              spreadPct: Number(marketData.spreadPct || 0),
+              topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
+            });
+
+            ensureTradeFromSignal(signal, plan);
+            recommendedCount++;
+
+            await sendTelegramMessage(formatRecommendationTelegram({
+              symbol,
+              action: 'open',
+              customScore: signal.customScore,
+              tvScore: signal.tvScore,
+              mtfStatus: signal.mtfStatus,
+              mtfValues: signal.mtfValues,
+              liquidity: 'valid',
+              reason: signal.reason,
+              plan
+            }));
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Initial scan failed for ${symbol}:`, err.message);
+    }
+  }
+
+  if (allSignals.length) {
+    await sendTelegramMessage(formatSummaryTelegram(allSignals));
+  }
+
+  // --- BOUNDARY / PERIODIC FOLLOW-UP SCAN (NEW SIGNALS ONLY) ---
+  setInterval(async () => {
+    try {
+      const activeSymbols = await seedSymbols();
+
+      for (const symbol of activeSymbols) {
+        await new Promise(r => setTimeout(r, 100));
+
+        const byTf = {};
+        for (const tf of ['5', '15', '60', '240', 'D']) {
+          byTf[tf] = await getLatestCandles(symbol, tf, 200);
+        }
+
+        const ticker = await fetchTicker(symbol);
+        const marketData = await buildMarketData(symbol);
+        const signal = await evaluateSignal(symbol, byTf, { ...ticker, ...marketData });
+
+        if (!signal || signal.decision !== 'accept') continue;
+
+        const tradeCheck = shouldOpenTrade(signal, {
+          volume24hUsd: Number(marketData.volume24hUsd || 0),
+          spreadPct: Number(marketData.spreadPct || 0),
+          topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
+        });
+
+        if (tradeCheck.open) {
+          const plan = buildTradePlan(signal, {
+            volume24hUsd: Number(marketData.volume24hUsd || 0),
+            spreadPct: Number(marketData.spreadPct || 0),
+            topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
+          });
+
+          ensureTradeFromSignal(signal, plan);
+
+          await sendTelegramMessage(formatSignalBlock({
+            symbol: signal.symbol,
+            time: new Date().toISOString(),
+            decision: signal.decision,
+            reason: signal.reason,
+            customScore: signal.customScore,
+            tvScore: signal.tvScore,
+            mtfStatus: signal.mtfStatus,
+            mtfValues: signal.mtfValues,
+            price: signal.price,
+            volume24h: Number(marketData.volume24hUsd || 0),
+            spreadPct: Number(marketData.spreadPct || 0),
+            liquidity: 'valid',
+            trailingStop: 'higher_lows or close below 14MA',
+            takeProfit: '3%',
+            action: 'open'
+          }));
+        }
+      }
+
+      await syncOpenTradesFromMarket();
+    } catch (err) {
+      console.error('Periodic boundary scan failed:', err.message);
+    }
+  }, 15000);
 }
 
 async function syncOpenTradesFromMarket() {
@@ -139,130 +314,6 @@ async function syncOpenTradesFromMarket() {
 
     updateTradeFromMarket(trade.symbol, currentPrice, candles.D || []);
   }
-}
-
-async function bootstrapStrategy() {
-  console.log('Bootstrapping strategy');
-
-  const symbols = await seedSymbols();
-  if (!symbols.length) {
-    console.log('No symbols loaded');
-    return;
-  }
-
-  if (config.USE_WS) {
-    bybitWs.connect();
-
-    bybitWs.on('kline', async (msg) => {
-      const topic = msg?.topic || '';
-      const symbol = String(topic).split('.').slice(2).join('.');
-      const tf = String(topic).split('.')[1] || 'D';
-
-      const candle = normalizeWsCandle(msg);
-      if (!candle || !symbol || !tf) return;
-
-      const normalized = {
-        open_time: candle.open_time,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: candle.volume
-      };
-
-      await saveKline(symbol, tf, normalized);
-
-      if (tf === 'D') {
-        try {
-          await evaluateAndSend(symbol);
-          await syncOpenTradesFromMarket();
-        } catch (err) {
-          console.error('WS evaluation failed for', symbol, err.message);
-        }
-      }
-    });
-
-    if (!wsBootstrapped) {
-      bybitWs.subscribe(symbols.slice(0, 50), ['5', '15', '60', '240', 'D']);
-      wsBootstrapped = true;
-    }
-  }
-
-  const allSignals = [];
-
-  for (const symbol of symbols.slice(0, 30)) {
-    try {
-      const candleMap = await fetchCandlesForSymbol(symbol);
-      const ticker = await fetchTicker(symbol);
-      const marketData = await buildMarketData(symbol);
-      const signal = await evaluateSignal(symbol, candleMap, { ...ticker, ...marketData });
-      if (signal) {
-        await recordSignal(signal); // Save initial scan signals to DB
-        allSignals.push(signal);
-      }
-    } catch (err) {
-      console.error(`Initial scan failed for ${symbol}:`, err.message);
-    }
-  }
-
-  if (allSignals.length) {
-    await sendTelegramMessage(formatSummaryTelegram(allSignals));
-  }
-
-  setInterval(async () => {
-    try {
-      const activeSymbols = (await fetchAllSymbols()).slice(0, 40);
-
-      for (const item of activeSymbols) {
-        const symbol = item.symbol;
-
-        const byTf = {};
-        for (const tf of ['5', '15', '60', '240', 'D']) {
-          byTf[tf] = await getLatestCandles(symbol, tf, 200);
-        }
-
-        const ticker = await fetchTicker(symbol);
-        const marketData = await buildMarketData(symbol);
-        const signal = await evaluateSignal(symbol, byTf, { ...ticker, ...marketData });
-
-        if (!signal) continue;
-
-        await recordSignal(signal); // Save periodic scan signals to DB
-
-        if (signal.decision === 'accept') {
-          const tradeCheck = shouldOpenTrade(signal, {
-            volume24hUsd: Number(marketData.volume24hUsd || 0),
-            spreadPct: Number(marketData.spreadPct || 0),
-            topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-          });
-
-          if (tradeCheck.open) {
-            const plan = buildTradePlan(signal, {
-              volume24hUsd: Number(marketData.volume24hUsd || 0),
-              spreadPct: Number(marketData.spreadPct || 0),
-              topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-            });
-
-            ensureTradeFromSignal(signal, plan);
-
-            await sendTelegramMessage(formatRecommendationTelegram({
-              symbol,
-              action: 'open',
-              customScore: signal.customScore,
-              tvScore: signal.tvScore,
-              mtfStatus: signal.mtfStatus,
-              liquidity: 'valid',
-              reason: signal.reason
-            }));
-          }
-        }
-      }
-
-      await syncOpenTradesFromMarket();
-    } catch (err) {
-      console.error('Periodic scan failed:', err.message);
-    }
-  }, 15000);
 }
 
 module.exports = {
