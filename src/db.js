@@ -3,7 +3,7 @@ const config = require('./config');
 
 const pool = new Pool({
   connectionString: config.DATABASE_URL,
-  ssl: config.DB_SSL === 'true' || config.DB_SSL === true
+  ssl: config.DB_SSL === true || String(config.DB_SSL).toLowerCase() === 'true'
     ? { rejectUnauthorized: false }
     : false
 });
@@ -92,11 +92,52 @@ async function listOpenTrades() {
   return result.rows;
 }
 
+async function countOpenTrades() {
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM open_trades WHERE status = 'open'`
+  );
+  return Number(result.rows[0]?.count || 0);
+}
+
+async function getOpenTradeBySymbol(symbol) {
+  const result = await pool.query(
+    `
+    SELECT *
+    FROM open_trades
+    WHERE symbol = $1 AND status = 'open'
+    ORDER BY created_at DESC
+    LIMIT 1
+    `,
+    [symbol]
+  );
+  return result.rows[0] || null;
+}
+
 async function saveOpenTrade(trade) {
   const result = await pool.query(
     `
-    INSERT INTO open_trades (symbol, side, status, entry_price, stop_loss, take_profit, trailing_stop, score, created_at, updated_at)
+    INSERT INTO open_trades (
+      symbol,
+      side,
+      status,
+      entry_price,
+      stop_loss,
+      take_profit,
+      trailing_stop,
+      score,
+      created_at,
+      updated_at
+    )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ON CONFLICT (symbol) DO UPDATE SET
+      side = EXCLUDED.side,
+      status = EXCLUDED.status,
+      entry_price = EXCLUDED.entry_price,
+      stop_loss = EXCLUDED.stop_loss,
+      take_profit = EXCLUDED.take_profit,
+      trailing_stop = EXCLUDED.trailing_stop,
+      score = EXCLUDED.score,
+      updated_at = EXCLUDED.updated_at
     RETURNING *
     `,
     [
@@ -115,10 +156,36 @@ async function saveOpenTrade(trade) {
   return result.rows[0];
 }
 
+async function updateOpenTradeStatus(symbol, status, reason = null) {
+  const values = [symbol, status, Date.now()];
+  const sql = reason
+    ? `
+      UPDATE open_trades
+      SET status = $2, updated_at = $3, reason = $4
+      WHERE symbol = $1
+    `
+    : `
+      UPDATE open_trades
+      SET status = $2, updated_at = $3
+      WHERE symbol = $1
+    `;
+
+  await pool.query(sql, reason ? [symbol, status, Date.now(), reason] : values);
+}
+
 async function recordSignal(signal) {
   await pool.query(
     `
-    INSERT INTO signals (symbol, timeframe, decision, reason, custom_score, tv_score, mtf_status, status)
+    INSERT INTO signals (
+      symbol,
+      timeframe,
+      decision,
+      reason,
+      custom_score,
+      tv_score,
+      mtf_status,
+      status
+    )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `,
     [
@@ -151,8 +218,7 @@ async function saveMtfState(symbol, timeframe, state) {
     `
     INSERT INTO mtf_state (symbol, timeframe, state, last_updated)
     VALUES ($1, $2, $3, $4)
-    ON CONFLICT (symbol) DO UPDATE SET
-      timeframe = EXCLUDED.timeframe,
+    ON CONFLICT (symbol, timeframe) DO UPDATE SET
       state = EXCLUDED.state,
       last_updated = EXCLUDED.last_updated
     `,
@@ -182,7 +248,10 @@ module.exports = {
   saveKlines,
   getLatestCandles,
   listOpenTrades,
+  countOpenTrades,
+  getOpenTradeBySymbol,
   saveOpenTrade,
+  updateOpenTradeStatus,
   recordSignal,
   getMtfState,
   saveMtfState,
