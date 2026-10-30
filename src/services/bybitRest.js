@@ -31,13 +31,8 @@ async function safeBybitRequest(fn, context = 'request') {
     const status = err?.response?.status;
     const data = err?.response?.data;
 
-    if (status === 400 || status === 404) {
+    if ([400, 402, 403, 404, 429].includes(status)) {
       console.warn(`[Bybit ${context}] skipped due to ${status}:`, data || err.message);
-      return null;
-    }
-
-    if (status === 429) {
-      console.warn(`[Bybit ${context}] rate limited. Retrying later...`);
       return null;
     }
 
@@ -161,10 +156,7 @@ async function fetchOrderBook(symbol, limit = 25) {
   );
 
   if (!res) {
-    return {
-      bids: [],
-      asks: []
-    };
+    return { bids: [], asks: [] };
   }
 
   const result = res?.data?.result || {};
