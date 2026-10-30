@@ -9,7 +9,6 @@ function formatSummaryTelegram(signals) {
 }
 
 function formatRecommendationTelegram(item) {
-  // Format MTF timeframe breakdown values (e.g. 5: ✓, 15: ✗)
   const mtfValues = item.mtfValues || {};
   const tfString = Object.entries(mtfValues)
     .map(([tf, status]) => `${tf}m: ${status === 'bullish' ? '✓' : '✗'}`)
