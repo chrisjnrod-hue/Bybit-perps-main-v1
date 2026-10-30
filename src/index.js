@@ -22,10 +22,12 @@ app.get('/health', (req, res) => {
 const port = Number(config.PORT || 3000);
 
 async function runMigrations() {
-  // Search common paths for the migration file dynamically
   const possibleFolders = [
+    path.join(__dirname, '../migrations'),
     path.join(__dirname, '../migration'),
+    path.join(__dirname, './migrations'),
     path.join(__dirname, './migration'),
+    path.join(process.cwd(), 'migrations'),
     path.join(process.cwd(), 'migration')
   ];
 
@@ -54,9 +56,15 @@ async function runMigrations() {
 
 async function start() {
   await runMigrations();
-  await bootstrapStrategy();
+
+  // 1. Bind and listen on port IMMEDIATELY for Render
   app.listen(port, () => {
     console.log(`Bot listening on port ${port}`);
+  });
+
+  // 2. Run strategy bootstrap asynchronously in the background so port binding isn't blocked
+  bootstrapStrategy().catch((err) => {
+    console.error('Strategy bootstrap failed:', err.message);
   });
 }
 
