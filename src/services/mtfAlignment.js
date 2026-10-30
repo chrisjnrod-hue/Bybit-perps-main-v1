@@ -28,9 +28,14 @@ function evaluateMtfAlignment(candlesByTf = {}) {
   const positiveRatio = bullish / total;
 
   let status = 'neutral';
-  if (bullish > 0 && negative === 0) status = 'bullish';
-  else if (negative > 0 && bullish === 0) status = 'negative';
-  else if (bullish > 0 && negative > 0) status = 'mixed';
+
+  if (bullish >= Math.max(3, Math.ceil(total * 0.6)) && negative === 0) {
+    status = 'bullish';
+  } else if (negative >= Math.max(2, Math.ceil(total * 0.4)) && bullish === 0) {
+    status = 'negative';
+  } else if (bullish > 0 && negative > 0) {
+    status = 'mixed';
+  }
 
   return {
     status,
