@@ -19,7 +19,8 @@ async function evaluateSignal(symbol, candlesByTf, ticker) {
     '5': candlesByTf['5'] || [],
     '15': candlesByTf['15'] || [],
     '60': candlesByTf['60'] || [],
-    '240': candlesByTf['240'] || []
+    '240': candlesByTf['240'] || [],
+    'D': candlesByTf['D'] || []
   });
 
   const liquidity = checkLiquidity(
@@ -57,7 +58,7 @@ async function evaluateSignal(symbol, candlesByTf, ticker) {
     customScore: score.score,
     tvScore: tv.score,
     mtfStatus: mtf.status,
-    mtfValues: mtf.values, // Attached timeframe check breakdown (✓/✗)
+    mtfValues: mtf.values,
     status: decision === 'accept' ? 'new' : 'monitor',
     price: Number(daily[daily.length - 1]?.close || 0),
     liquidity,
