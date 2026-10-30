@@ -13,7 +13,6 @@ async function evaluateSignal(symbol, candlesByTf, ticker) {
   const macdFlip = detectBullishHistogramFlip(daily);
   const above7ma = currentOpenAboveMA(daily, 7);
 
-  // Passes if ONE or BOTH criteria are met
   if (!macdFlip && !above7ma) return null;
 
   const mtf = evaluateMtfAlignment({
@@ -43,12 +42,9 @@ async function evaluateSignal(symbol, candlesByTf, ticker) {
   });
 
   const tv = await getTradingViewRating(symbol);
-
-  // FIXED: Added await and passed timeframe 'D'
   const previousState = await getMtfState(symbol, 'D');
   const decision = score.score >= 65 && liquidity.valid ? 'accept' : 'monitor';
 
-  // Determine accurate reason string based on which criteria matched
   let reason = 'open above 7MA';
   if (macdFlip && above7ma) reason = 'MACD histogram flip & open above 7MA';
   else if (macdFlip) reason = 'daily MACD histogram flip';
@@ -61,6 +57,7 @@ async function evaluateSignal(symbol, candlesByTf, ticker) {
     customScore: score.score,
     tvScore: tv.score,
     mtfStatus: mtf.status,
+    mtfValues: mtf.values, // Attached timeframe check breakdown (✓/✗)
     status: decision === 'accept' ? 'new' : 'monitor',
     price: Number(daily[daily.length - 1]?.close || 0),
     liquidity,
@@ -69,7 +66,6 @@ async function evaluateSignal(symbol, candlesByTf, ticker) {
       : 'stable'
   };
 
-  // FIXED: Properly awaited async DB operations
   await setMtfState(symbol, 'D', mtf.status);
   await recordSignal(signal);
 
