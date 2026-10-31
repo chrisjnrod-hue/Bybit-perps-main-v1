@@ -19,10 +19,10 @@ function filterUsdtPerpetualSymbols(symbols) {
         return false;
       }
 
-      // Exclude tokens starting with digits (multipliers/leveraged tokens, e.g. 10000NEXUSDT)[cite: 1]
+      // Exclude tokens starting with digits (multipliers/leveraged tokens, e.g. 10000NEXUSDT)
       if (/^[0-9]/.test(symbol)) return false;
 
-      // Exclude stock perpetuals and equity tickers[cite: 3]
+      // Exclude stock perpetuals and equity tickers
       const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
       if (stockSymbols.includes(symbol)) {
         return false;
@@ -36,4 +36,3 @@ function filterUsdtPerpetualSymbols(symbols) {
 module.exports = {
   filterUsdtPerpetualSymbols
 };
-```[cite: 6]
