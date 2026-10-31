@@ -2,7 +2,7 @@ const axios = require('axios');
 const config = require('../config');
 
 const client = axios.create({
-  baseURL: config.BYBIT_REST_BASE || 'https://api.bybit.com',
+  baseURL: config.BYBIT_REST_BASE || 'https://bybit.com',
   timeout: config.BYBIT_REST_TIMEOUT_MS || 7000
 });
 
@@ -58,10 +58,10 @@ function normalizeUsdtSymbol(symbol, contractType = 'LinearPerpetual') {
     return null;
   }
 
-  // Skip tokens starting with numbers or multiplier prefixes (e.g. 10000NEXUSDT, 0GUSDT)[cite: 1]
+  // Skip tokens starting with numbers or multiplier prefixes (e.g. 10000NEXUSDT, 0GUSDT)
   if (/^[0-9]/.test(s)) return null;
 
-  // Exclude stock perpetuals or equity tickers[cite: 3]
+  // Exclude stock perpetuals or equity tickers
   const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
   if (stockSymbols.includes(s)) {
     return null;
@@ -81,7 +81,7 @@ async function fetchAllSymbols() {
           params: {
             category: 'linear',
             status: 'Trading',
-            limit: 1000,
+            limit: '1000', // String cast to fit API strict formats
             ...(cursor ? { cursor } : {})
           }
         }),
@@ -119,6 +119,9 @@ async function fetchAllSymbols() {
 }
 
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
+  // Enforce Bybit's maximum validation constraint boundary (1 - 200)
+  const enforcedLimit = Math.min(200, Math.max(1, Number(limit)));
+
   const res = await safeBybitRequest(
     () =>
       client.get('/v5/market/kline', {
@@ -126,7 +129,7 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
           category: 'linear',
           symbol,
           interval,
-          limit
+          limit: String(enforcedLimit) // Cast integer cleanly to string format
         }
       }),
     `fetchKlines:${symbol}:${interval}`
@@ -164,13 +167,16 @@ async function fetchTicker(symbol) {
 }
 
 async function fetchOrderBook(symbol, limit = 25) {
+  // Enforce Bybit's orderbook limits (max 50 for linear)
+  const enforcedLimit = Math.min(50, Math.max(1, Number(limit)));
+
   const res = await safeBybitRequest(
     () =>
       client.get('/v5/market/orderbook', {
         params: {
           category: 'linear',
           symbol,
-          limit
+          limit: String(enforcedLimit)
         }
       }),
     `fetchOrderBook:${symbol}`
@@ -194,7 +200,7 @@ async function fetchFundingRate(symbol) {
         params: {
           category: 'linear',
           symbol,
-          limit: 1
+          limit: '1'
         }
       }),
     `fetchFundingRate:${symbol}`
