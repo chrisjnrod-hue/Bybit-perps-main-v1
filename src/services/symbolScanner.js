@@ -1,36 +1,49 @@
 const config = require('../config');
 
+function normalizeSymbol(symbol) {
+  return String(symbol || '').trim().toUpperCase();
+}
+
+function isValidSymbolPattern(symbol) {
+  const pattern = config.SYMBOL_FILTER || '.*';
+  try {
+    return new RegExp(pattern, 'i').test(symbol);
+  } catch (err) {
+    console.warn('Invalid SYMBOL_FILTER regex:', pattern, err.message);
+    return true; // safe fallback: accept all instead of crashing
+  }
+}
+
 function filterUsdtPerpetualSymbols(symbols) {
   return (symbols || [])
     .filter((item) => {
       if (!item || !item.symbol) return false;
-      const symbol = String(item.symbol).toUpperCase();
 
-      // Must end with USDT or USDT.P
-      if (!/USDT(\.P)?$/.test(symbol)) return false;
+      const symbol = normalizeSymbol(item.symbol);
 
-      // Verify contract type is Linear Perpetual if available
-      if (item.contractType && item.contractType !== 'LinearPerpetual') {
+      // Accept common Bybit perpetual symbol formats
+      if (!/^(?!\d)[A-Z0-9]+USDT(\.P)?$/.test(symbol)) return false;
+
+      const contractType = String(item.contractType || '').trim().toUpperCase();
+
+      if (contractType && !['LINEARPERPETUAL'].includes(contractType)) {
         return false;
       }
 
-      // Exclude dated/quarterly delivery contracts
-      if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(symbol) || /[0-9]{2}[A-Z]{3}[0-9]{2}/.test(symbol)) {
-        return false;
-      }
+      // Exclude dated contracts
+      if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(symbol)) return false;
 
-      // Exclude tokens starting with digits (multipliers/leveraged tokens, e.g. 10000NEXUSDT)
+      // Exclude stock/equity tickers and weird multipliers
       if (/^[0-9]/.test(symbol)) return false;
 
-      // Exclude stock perpetuals and equity tickers
-      const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
-      if (stockSymbols.includes(symbol)) {
-        return false;
-      }
+      const stockSymbols = new Set([
+        'AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'
+      ]);
+      if (stockSymbols.has(symbol)) return false;
 
-      return new RegExp(config.SYMBOL_FILTER).test(symbol);
+      return isValidSymbolPattern(symbol);
     })
-    .map((item) => item.symbol);
+    .map((item) => normalizeSymbol(item.symbol));
 }
 
 module.exports = {
