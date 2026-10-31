@@ -30,14 +30,15 @@ async function safeBybitRequest(fn, context = 'request') {
     await waitForRateLimit();
     return await fn();
   } catch (err) {
-    const status = err?.response?.status;
-    const data = err?.response?.data;
-
-    if ([400, 402, 403, 404, 429].includes(status)) {
-      console.warn(`[Bybit ${context}] skipped due to ${status}:`, data || err.message);
-      return null;
-    }
-
+    const reqConfig = err?.config || {};
+    console.error('=== BYBIT FAILED REQUEST ===');
+    console.error('context:', context);
+    console.error('baseURL:', reqConfig.baseURL);
+    console.error('url:', reqConfig.url);
+    console.error('params:', reqConfig.params);
+    console.error('status:', err?.response?.status);
+    console.error('data:', err?.response?.data);
+    console.error('message:', err?.message);
     throw err;
   }
 }
