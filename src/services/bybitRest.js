@@ -119,33 +119,63 @@ async function fetchAllSymbols() {
 }
 
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
-  // Enforce Bybit's maximum validation constraint boundary (1 - 200)
-  const enforcedLimit = Math.min(200, Math.max(1, Number(limit)));
+  // 1. Force strict bounds checks on limits to prevent Bybit boundary exceptions
+  const parsedLimit = Number(limit);
+  const enforcedLimit = Math.min(200, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 120));
+
+  // 2. Strict whitelist fallback match for Bybit V5 valid intervals
+  const validIntervals = ['1', '3', '5', '15', '30', '60', '120', '240', '360', '720', 'D', 'M', 'W'];
+  
+  let enforcedInterval = String(interval).trim();
+  if (enforcedInterval === '1D' || enforcedInterval === 'd') {
+    enforcedInterval = 'D';
+  }
+
+  // Circuit breaker: Force a fallback to 'D' if a bad or missing interval gets passed out
+  if (!validIntervals.includes(enforcedInterval)) {
+    console.warn(`[Bybit Scanner Override] Invalid interval "${interval}" detected for ${symbol}. Defaulting safely to "D".`);
+    enforcedInterval = 'D';
+  }
 
   const res = await safeBybitRequest(
     () =>
       client.get('/v5/market/kline', {
         params: {
           category: 'linear',
-          symbol,
-          interval,
-          limit: String(enforcedLimit) // Cast integer cleanly to string format
+          symbol: String(symbol).toUpperCase().trim(),
+          interval: String(enforcedInterval), // Ensure type is strictly a string primitive
+          limit: String(enforcedLimit)
         }
       }),
-    `fetchKlines:${symbol}:${interval}`
+    `fetchKlines:${symbol}:${enforcedInterval}`
   );
 
   if (!res) return [];
 
   const rows = res?.data?.result?.list || [];
-  return rows.map((row) => ({
-    open_time: Number(row.start || row[0] || 0),
-    open: Number(row.open || row[1] || 0),
-    high: Number(row.high || row[2] || 0),
-    low: Number(row.low || row[3] || 0),
-    close: Number(row.close || row[4] || 0),
-    volume: Number(row.volume || row[5] || 0)
-  }));
+  
+  // Clean array extraction structure to handle Bybit V5 nested item layouts safely
+  return rows.map((row) => {
+    if (Array.isArray(row)) {
+      return {
+        open_time: Number(row[0] || 0),
+        open: Number(row[1] || 0),
+        high: Number(row[2] || 0),
+        low: Number(row[3] || 0),
+        close: Number(row[4] || 0),
+        volume: Number(row[5] || 0)
+      };
+    }
+    
+    return {
+      open_time: Number(row.start || 0),
+      open: Number(row.open || 0),
+      high: Number(row.high || 0),
+      low: Number(row.low || 0),
+      close: Number(row.close || 0),
+      volume: Number(row.volume || 0)
+    };
+  });
 }
 
 async function fetchTicker(symbol) {
