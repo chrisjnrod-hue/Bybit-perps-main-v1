@@ -13,22 +13,23 @@ const app = express();
 
 app.use(express.json());
 
-// Render health checks often hit "/" first, so this must return 200
+// Root endpoint for Render health checks
 app.get('/', (req, res) => {
   res.status(200).send('OK');
 });
 
+// Health endpoint for Render
 app.get('/health', (req, res) => {
   res.status(200).json({
     ok: true,
     useWs: Boolean(config.USE_WS),
-    port: Number(config.PORT || 3000)
+    port: Number(process.env.PORT || 3000)
   });
 });
 
 app.use('/debug', debugRoutes);
 
-const port = Number(config.PORT || 3000);
+const port = Number(process.env.PORT || 3000);
 
 async function runMigrations() {
   const possibleFolders = [
@@ -67,12 +68,10 @@ async function runMigrations() {
 async function start() {
   await runMigrations();
 
-  // Bind to all interfaces so Render can reach it
   app.listen(port, '0.0.0.0', () => {
     console.log(`Bot listening on port ${port}`);
   });
 
-  // Run bootstrap in the background
   bootstrapStrategy().catch((err) => {
     console.error('Strategy bootstrap failed:', err.message);
   });
