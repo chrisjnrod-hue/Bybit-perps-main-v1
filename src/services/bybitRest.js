@@ -1,9 +1,11 @@
 const axios = require('axios');
 const config = require('../config');
 
+const baseURL = (config.BYBIT_REST_BASE || 'https://api.bybit.com').replace(/\/+$/, '');
+
 const client = axios.create({
-  baseURL: config.BYBIT_REST_BASE || 'https://bybit.com',
-  timeout: config.BYBIT_REST_TIMEOUT_MS || 7000
+  baseURL,
+  timeout: Number(config.BYBIT_REST_TIMEOUT_MS || 7000)
 });
 
 const rateLimiter = {
@@ -49,7 +51,7 @@ function normalizeUsdtSymbol(symbol, contractType = 'LinearPerpetual') {
   if (!/USDT(\.P)?$/.test(s)) return null;
 
   // Enforce Linear Perpetual contract type if metadata is provided
-  if (contractType && contractType !== 'LinearPerpetual') {
+  if (contractType && String(contractType).trim().toUpperCase() !== 'LINEARPERPETUAL') {
     return null;
   }
 
@@ -81,7 +83,7 @@ async function fetchAllSymbols() {
           params: {
             category: 'linear',
             status: 'Trading',
-            limit: '1000', // String cast to fit API strict formats
+            limit: 1000,
             ...(cursor ? { cursor } : {})
           }
         }),
@@ -119,19 +121,16 @@ async function fetchAllSymbols() {
 }
 
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
-  // 1. Force strict bounds checks on limits to prevent Bybit boundary exceptions
   const parsedLimit = Number(limit);
   const enforcedLimit = Math.min(200, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 120));
 
-  // 2. Strict whitelist fallback match for Bybit V5 valid intervals
   const validIntervals = ['1', '3', '5', '15', '30', '60', '120', '240', '360', '720', 'D', 'M', 'W'];
-  
+
   let enforcedInterval = String(interval).trim();
   if (enforcedInterval === '1D' || enforcedInterval === 'd') {
     enforcedInterval = 'D';
   }
 
-  // Circuit breaker: Force a fallback to 'D' if a bad or missing interval gets passed out
   if (!validIntervals.includes(enforcedInterval)) {
     console.warn(`[Bybit Scanner Override] Invalid interval "${interval}" detected for ${symbol}. Defaulting safely to "D".`);
     enforcedInterval = 'D';
@@ -143,7 +142,7 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
         params: {
           category: 'linear',
           symbol: String(symbol).toUpperCase().trim(),
-          interval: String(enforcedInterval), // Ensure type is strictly a string primitive
+          interval: String(enforcedInterval),
           limit: String(enforcedLimit)
         }
       }),
@@ -153,8 +152,7 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
   if (!res) return [];
 
   const rows = res?.data?.result?.list || [];
-  
-  // Clean array extraction structure to handle Bybit V5 nested item layouts safely
+
   return rows.map((row) => {
     if (Array.isArray(row)) {
       return {
@@ -166,7 +164,7 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
         volume: Number(row[5] || 0)
       };
     }
-    
+
     return {
       open_time: Number(row.start || 0),
       open: Number(row.open || 0),
@@ -184,7 +182,7 @@ async function fetchTicker(symbol) {
       client.get('/v5/market/tickers', {
         params: {
           category: 'linear',
-          symbol
+          symbol: String(symbol).toUpperCase().trim()
         }
       }),
     `fetchTicker:${symbol}`
@@ -197,7 +195,6 @@ async function fetchTicker(symbol) {
 }
 
 async function fetchOrderBook(symbol, limit = 25) {
-  // Enforce Bybit's orderbook limits (max 50 for linear)
   const enforcedLimit = Math.min(50, Math.max(1, Number(limit)));
 
   const res = await safeBybitRequest(
@@ -205,7 +202,7 @@ async function fetchOrderBook(symbol, limit = 25) {
       client.get('/v5/market/orderbook', {
         params: {
           category: 'linear',
-          symbol,
+          symbol: String(symbol).toUpperCase().trim(),
           limit: String(enforcedLimit)
         }
       }),
@@ -229,7 +226,7 @@ async function fetchFundingRate(symbol) {
       client.get('/v5/market/funding/history', {
         params: {
           category: 'linear',
-          symbol,
+          symbol: String(symbol).toUpperCase().trim(),
           limit: '1'
         }
       }),
