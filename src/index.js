@@ -1,23 +1,32 @@
 require('dotenv').config();
+
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+
 const config = require('./config');
 const debugRoutes = require('./routes/debug');
 const { bootstrapStrategy } = require('./services/strategyEngine');
 const { pool } = require('./db');
 
 const app = express();
+
 app.use(express.json());
-app.use('/debug', debugRoutes);
+
+// Render health checks often hit "/" first, so this must return 200
+app.get('/', (req, res) => {
+  res.status(200).send('OK');
+});
 
 app.get('/health', (req, res) => {
-  res.json({
+  res.status(200).json({
     ok: true,
-    useWs: config.USE_WS,
+    useWs: Boolean(config.USE_WS),
     port: Number(config.PORT || 3000)
   });
 });
+
+app.use('/debug', debugRoutes);
 
 const port = Number(config.PORT || 3000);
 
@@ -37,6 +46,7 @@ async function runMigrations() {
     if (fs.existsSync(folder)) {
       const files = fs.readdirSync(folder);
       const found = files.find(f => f.endsWith('.sql') || f.endsWith('.db') || f.includes('init'));
+
       if (found) {
         migrationFile = path.join(folder, found);
         break;
@@ -57,12 +67,12 @@ async function runMigrations() {
 async function start() {
   await runMigrations();
 
-  // 1. Bind and listen on port IMMEDIATELY for Render
-  app.listen(port, () => {
+  // Bind to all interfaces so Render can reach it
+  app.listen(port, '0.0.0.0', () => {
     console.log(`Bot listening on port ${port}`);
   });
 
-  // 2. Run strategy bootstrap asynchronously in the background so port binding isn't blocked
+  // Run bootstrap in the background
   bootstrapStrategy().catch((err) => {
     console.error('Strategy bootstrap failed:', err.message);
   });
