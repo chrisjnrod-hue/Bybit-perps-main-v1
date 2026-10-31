@@ -40,19 +40,32 @@ async function safeBybitRequest(fn, context = 'request') {
   }
 }
 
-function normalizeUsdtSymbol(symbol) {
+function normalizeUsdtSymbol(symbol, contractType = 'LinearPerpetual') {
   if (!symbol) return null;
   const s = String(symbol).trim().toUpperCase();
   if (!s) return null;
-  
-  // Filter out delivery contracts or quarterly futures if any slip through
-  if (/USDT[QHUZ0-9]/.test(s.slice(-6))) return null;
-  
+
   // Must end with USDT or USDT.P
   if (!/USDT(\.P)?$/.test(s)) return null;
 
-  // Skip symbols starting with numbers (e.g. 0GUSDT, 10000NEXUSDT) to prevent 400 Bad Request errors[cite: 1]
+  // Enforce Linear Perpetual contract type if metadata is provided
+  if (contractType && contractType !== 'LinearPerpetual') {
+    return null;
+  }
+
+  // Filter out quarterly/delivery futures contracts (e.g. containing dates like -31MAR28)
+  if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(s) || /[0-9]{2}[A-Z]{3}[0-9]{2}/.test(s)) {
+    return null;
+  }
+
+  // Skip tokens starting with numbers or multiplier prefixes (e.g. 10000NEXUSDT, 0GUSDT)[cite: 1]
   if (/^[0-9]/.test(s)) return null;
+
+  // Exclude known stock perpetuals or equity tickers that trigger 400 errors[cite: 3]
+  const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
+  if (stockSymbols.includes(s)) {
+    return null;
+  }
 
   return s;
 }
@@ -83,7 +96,7 @@ async function fetchAllSymbols() {
 
     const page = res?.data?.result?.list || [];
     for (const item of page) {
-      const symbol = normalizeUsdtSymbol(item.symbol);
+      const symbol = normalizeUsdtSymbol(item.symbol, item.contractType);
       if (!symbol) continue;
 
       list.push({
@@ -201,3 +214,50 @@ module.exports = {
   fetchFundingRate,
   normalizeUsdtSymbol
 };
+```[cite: 2]
+
+---
+
+### 2. `src/services/symbolScanner.js`
+*Updated to ensure the scanner array filter enforces perpetual contract criteria directly[cite: 6].*
+
+```javascript
+const config = require('../config');
+
+function filterUsdtPerpetualSymbols(symbols) {
+  return (symbols || [])
+    .filter((item) => {
+      if (!item || !item.symbol) return false;
+      const symbol = String(item.symbol).toUpperCase();
+
+      // Must end with USDT or USDT.P
+      if (!/USDT(\.P)?$/.test(symbol)) return false;
+
+      // Verify contract type is Linear Perpetual if available
+      if (item.contractType && item.contractType !== 'LinearPerpetual') {
+        return false;
+      }
+
+      // Exclude dated/quarterly delivery contracts
+      if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(symbol) || /[0-9]{2}[A-Z]{3}[0-9]{2}/.test(symbol)) {
+        return false;
+      }
+
+      // Exclude tokens starting with digits (multipliers/leveraged tokens)[cite: 1]
+      if (/^[0-9]/.test(symbol)) return false;
+
+      // Exclude stock perpetuals[cite: 3]
+      const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
+      if (stockSymbols.includes(symbol)) {
+        return false;
+      }
+
+      return new RegExp(config.SYMBOL_FILTER).test(symbol);
+    })
+    .map((item) => item.symbol);
+}
+
+module.exports = {
+  filterUsdtPerpetualSymbols
+};
+```[cite: 6]
