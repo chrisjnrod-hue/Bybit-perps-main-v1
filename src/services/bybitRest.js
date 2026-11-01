@@ -108,7 +108,6 @@ async function fetchAllSymbols() {
   while (true) {
     const requestParams = {
       category: 'linear',
-      status: 'Trading',
       limit: 1000,
       ...(cursor ? { cursor } : {})
     };
@@ -132,7 +131,10 @@ async function fetchAllSymbols() {
     }
 
     const page = res?.data?.result?.list || [];
+
     for (const item of page) {
+      if (String(item?.status || '').trim() !== 'Trading') continue;
+
       const symbol = normalizeUsdtSymbol(item.symbol, item.contractType);
       if (!symbol) continue;
 
