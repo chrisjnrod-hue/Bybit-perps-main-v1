@@ -25,20 +25,53 @@ async function waitForRateLimit() {
   rateLimiter.lastCallAt = Date.now();
 }
 
+function formatBybitError(err) {
+  const reqConfig = err?.config || {};
+  const url =
+    reqConfig.baseURL && reqConfig.url
+      ? new URL(reqConfig.url, reqConfig.baseURL).toString()
+      : reqConfig.url || 'unknown';
+
+  return {
+    url,
+    method: reqConfig.method || 'GET',
+    params: reqConfig.params || {},
+    status: err?.response?.status || null,
+    statusText: err?.response?.statusText || null,
+    retCode: err?.response?.data?.retCode || null,
+    retMsg: err?.response?.data?.retMsg || null,
+    rawData: err?.response?.data || null,
+    message: err?.message || null
+  };
+}
+
 async function safeBybitRequest(fn, context = 'request') {
   try {
     await waitForRateLimit();
     return await fn();
   } catch (err) {
-    const reqConfig = err?.config || {};
-    console.error('=== BYBIT FAILED REQUEST ===');
+    const info = formatBybitError(err);
+
+    console.error('=== BYBIT DEBUG ===');
     console.error('context:', context);
-    console.error('baseURL:', reqConfig.baseURL);
-    console.error('url:', reqConfig.url);
-    console.error('params:', reqConfig.params);
-    console.error('status:', err?.response?.status);
-    console.error('data:', err?.response?.data);
-    console.error('message:', err?.message);
+    console.error('method:', info.method);
+    console.error('url:', info.url);
+    console.error('params:', JSON.stringify(info.params, null, 2));
+    console.error('status:', info.status);
+    console.error('statusText:', info.statusText);
+    console.error('retCode:', info.retCode);
+    console.error('retMsg:', info.retMsg);
+    console.error('rawData:', JSON.stringify(info.rawData, null, 2));
+    console.error('axios message:', info.message);
+    console.error('==================');
+
+    // keep the previous behavior for callers
+    const status = err?.response?.status;
+    if ([400, 402, 403, 404, 429].includes(status)) {
+      console.warn(`[Bybit ${context}] skipped due to ${status}:`, err?.response?.data || err.message);
+      return null;
+    }
+
     throw err;
   }
 }
@@ -78,6 +111,11 @@ async function fetchAllSymbols() {
   let cursor = null;
 
   while (true) {
+    console.log('[bybitRest] fetchAllSymbols start', {
+      baseURL: client.defaults.baseURL,
+      cursor
+    });
+
     const res = await safeBybitRequest(
       () =>
         client.get('/v5/market/instruments-info', {
