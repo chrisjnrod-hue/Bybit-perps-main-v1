@@ -63,9 +63,9 @@ async function safeBybitRequest(fn, context = 'request') {
     console.error('retMsg:', info.retMsg);
     console.error('rawData:', JSON.stringify(info.rawData, null, 2));
     console.error('axios message:', info.message);
+    console.error('stack:', err?.stack);
     console.error('==================');
 
-    // keep the previous behavior for callers
     const status = err?.response?.status;
     if ([400, 402, 403, 404, 429].includes(status)) {
       console.warn(`[Bybit ${context}] skipped due to ${status}:`, err?.response?.data || err.message);
@@ -81,23 +81,18 @@ function normalizeUsdtSymbol(symbol, contractType = 'LinearPerpetual') {
   const s = String(symbol).trim().toUpperCase();
   if (!s) return null;
 
-  // Must end with USDT or USDT.P
   if (!/USDT(\.P)?$/.test(s)) return null;
 
-  // Enforce Linear Perpetual contract type if metadata is provided
   if (contractType && String(contractType).trim().toUpperCase() !== 'LINEARPERPETUAL') {
     return null;
   }
 
-  // Filter out quarterly/delivery futures contracts
   if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(s) || /[0-9]{2}[A-Z]{3}[0-9]{2}/.test(s)) {
     return null;
   }
 
-  // Skip tokens starting with numbers or multiplier prefixes (e.g. 10000NEXUSDT, 0GUSDT)
   if (/^[0-9]/.test(s)) return null;
 
-  // Exclude stock perpetuals or equity tickers
   const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
   if (stockSymbols.includes(s)) {
     return null;
@@ -111,20 +106,21 @@ async function fetchAllSymbols() {
   let cursor = null;
 
   while (true) {
-    console.log('[bybitRest] fetchAllSymbols start', {
-      baseURL: client.defaults.baseURL,
-      cursor
-    });
+    const requestParams = {
+      category: 'linear',
+      status: 'Trading',
+      limit: 1000,
+      ...(cursor ? { cursor } : {})
+    };
+
+    console.log('[bybitRest] fetchAllSymbols start');
+    console.log('[bybitRest] baseURL =', client.defaults.baseURL);
+    console.log('[bybitRest] request params =', JSON.stringify(requestParams, null, 2));
 
     const res = await safeBybitRequest(
       () =>
         client.get('/v5/market/instruments-info', {
-          params: {
-            category: 'linear',
-            status: 'Trading',
-            limit: 1000,
-            ...(cursor ? { cursor } : {})
-          }
+          params: requestParams
         }),
       'fetchAllSymbols'
     );
