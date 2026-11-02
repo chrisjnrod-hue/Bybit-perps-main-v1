@@ -177,11 +177,20 @@ async function bootstrapStrategy() {
   const maxTrades = Number(config.MAX_OPEN_TRADES || 3);
   let recommendedCount = 0;
 
-  console.log(`Starting full A-Z scan across ${symbols.length} symbols...`);
+  const maxStartupSymbols = Number(config.STARTUP_SCAN_MAX_SYMBOLS || 0);
+  const startupSymbols = maxStartupSymbols > 0
+    ? symbols.slice(0, maxStartupSymbols)
+    : symbols;
 
-  for (const symbol of symbols) {
+  const startupDelayMs = Number(config.STARTUP_SCAN_DELAY_MS || 1000);
+
+  console.log(
+    `Starting startup scan across ${startupSymbols.length} of ${symbols.length} symbols...`
+  );
+
+  for (const symbol of startupSymbols) {
     try {
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((resolve) => setTimeout(resolve, startupDelayMs));
 
       const candleMap = await fetchCandlesForSymbol(symbol);
       const ticker = await fetchTicker(symbol);
