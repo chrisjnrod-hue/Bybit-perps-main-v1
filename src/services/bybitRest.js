@@ -78,7 +78,7 @@ async function safeBybitRequest(fn, context = 'request', options = {}) {
         return null;
       }
 
-      throw err; // preserve original axios error
+      throw err;
     }
 
     throw err;
@@ -167,59 +167,142 @@ async function fetchAllSymbols() {
 }
 
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
-  const parsedLimit = Number(limit);
-  const enforcedLimit = Math.min(200, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 120));
+  const cleanSymbol = String(symbol || '').toUpperCase().trim();
+  const cleanInterval = String(interval || 'D').trim();
+  const cleanLimit = String(limit || 200);
 
-  const validIntervals = ['1', '3', '5', '15', '30', '60', '120', '240', '360', '720', 'D', 'M', 'W'];
+  const candidates = [
+    {
+      path: '/v5/market/kline',
+      params: {
+        category: 'linear',
+        symbol: cleanSymbol,
+        interval: cleanInterval,
+        limit: cleanLimit
+      }
+    },
+    {
+      path: '/v2/public/kline',
+      params: {
+        symbol: cleanSymbol,
+        interval: cleanInterval,
+        limit: cleanLimit
+      }
+    },
+    {
+      path: '/v2/public/kline/list',
+      params: {
+        symbol: cleanSymbol,
+        interval: cleanInterval,
+        limit: cleanLimit
+      }
+    }
+  ];
 
-  let enforcedInterval = String(interval).trim();
-  if (enforcedInterval === '1D' || enforcedInterval === 'd') {
-    enforcedInterval = 'D';
-  }
-
-  if (!validIntervals.includes(enforcedInterval)) {
-    console.warn(`[Bybit Scanner Override] Invalid interval "${interval}" detected for ${symbol}. Defaulting safely to "D".`);
-    enforcedInterval = 'D';
-  }
-
-  const res = await safeBybitRequest(
-    () =>
-      client.get('/v5/market/kline', {
-        params: {
-          category: 'linear',
-          symbol: String(symbol).toUpperCase().trim(),
-          interval: String(enforcedInterval),
-          limit: String(enforcedLimit)
-        }
-      }),
-    `fetchKlines:${symbol}:${enforcedInterval}`
-  );
-
-  if (!res) return [];
-
-  const rows = res?.data?.result?.list || [];
-
-  return rows.map((row) => {
-    if (Array.isArray(row)) {
-      return {
-        open_time: Number(row[0] || 0),
-        open: Number(row[1] || 0),
-        high: Number(row[2] || 0),
-        low: Number(row[3] || 0),
-        close: Number(row[4] || 0),
-        volume: Number(row[5] || 0)
-      };
+  function normalizeRows(json) {
+    const v5List = json?.result?.list;
+    if (Array.isArray(v5List)) {
+      return v5List.map((row) => ({
+        open_time: Number(row?.start ?? row?.[0] ?? 0),
+        open: Number(row?.open ?? row?.[1] ?? 0),
+        high: Number(row?.high ?? row?.[2] ?? 0),
+        low: Number(row?.low ?? row?.[3] ?? 0),
+        close: Number(row?.close ?? row?.[4] ?? 0),
+        volume: Number(row?.volume ?? row?.[5] ?? 0)
+      }));
     }
 
-    return {
-      open_time: Number(row.start || 0),
-      open: Number(row.open || 0),
-      high: Number(row.high || 0),
-      low: Number(row.low || 0),
-      close: Number(row.close || 0),
-      volume: Number(row.volume || 0)
-    };
+    const rows = Array.isArray(json?.result)
+      ? json.result
+      : Array.isArray(json)
+        ? json
+        : [];
+
+    return rows.map((row) => ({
+      open_time: Number(row?.start ?? row?.start_at ?? row?.t ?? row?.open_time ?? row?.[0] ?? 0),
+      open: Number(row?.open ?? row?.o ?? row?.[1] ?? 0),
+      high: Number(row?.high ?? row?.h ?? row?.[2] ?? 0),
+      low: Number(row?.low ?? row?.l ?? row?.[3] ?? 0),
+      close: Number(row?.close ?? row?.c ?? row?.[4] ?? 0),
+      volume: Number(row?.volume ?? row?.v ?? row?.[5] ?? 0)
+    }));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      console.info('[bybitRest] fetchKlines trying', {
+        baseURL: client.defaults.baseURL,
+        path: candidate.path,
+        params: candidate.params
+      });
+
+      const response = await safeBybitRequest(
+        () =>
+          client.get(candidate.path, {
+            params: candidate.params,
+            timeout: 8000
+          }),
+        `fetchKlines:${cleanSymbol}:${cleanInterval}:${candidate.path}`
+      );
+
+      const json = response?.data;
+
+      if (!json) {
+        console.warn('[bybitRest] fetchKlines got an empty response', {
+          symbol: cleanSymbol,
+          path: candidate.path
+        });
+        continue;
+      }
+
+      const retCode = json.retCode ?? json.ret_code;
+      if (typeof retCode !== 'undefined' && Number(retCode) !== 0) {
+        console.warn('[bybitRest] fetchKlines API error; trying next endpoint', {
+          symbol: cleanSymbol,
+          path: candidate.path,
+          retCode,
+          retMsg: json.retMsg ?? json.ret_msg ?? null,
+          response: json
+        });
+        continue;
+      }
+
+      const rows = normalizeRows(json);
+      if (rows.length > 0) {
+        console.info('[bybitRest] fetchKlines succeeded', {
+          symbol: cleanSymbol,
+          path: candidate.path,
+          count: rows.length
+        });
+        return rows;
+      }
+
+      console.warn('[bybitRest] fetchKlines returned no rows; trying next endpoint', {
+        symbol: cleanSymbol,
+        path: candidate.path,
+        response: json
+      });
+    } catch (err) {
+      console.error('[bybitRest] fetchKlines endpoint failed; trying next endpoint', {
+        symbol: cleanSymbol,
+        path: candidate.path,
+        message: err?.message,
+        status: err?.response?.status,
+        statusText: err?.response?.statusText,
+        retCode: err?.response?.data?.retCode ?? err?.response?.data?.ret_code ?? null,
+        retMsg: err?.response?.data?.retMsg ?? err?.response?.data?.ret_msg ?? null,
+        response: err?.response?.data ?? null
+      });
+    }
+  }
+
+  console.error('[bybitRest] all kline endpoints failed', {
+    symbol: cleanSymbol,
+    interval: cleanInterval,
+    baseURL: client.defaults.baseURL
   });
+
+  return [];
 }
 
 async function fetchTicker(symbol) {
