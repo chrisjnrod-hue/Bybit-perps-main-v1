@@ -45,14 +45,17 @@ function formatBybitError(err) {
   };
 }
 
-async function safeBybitRequest(fn, context = 'request') {
+// Show failures clearly, but only swallow them when explicitly requested.
+async function safeBybitRequest(fn, context = 'request', options = {}) {
+  const { swallowHttpErrors = false } = options;
+
   try {
     await waitForRateLimit();
     return await fn();
   } catch (err) {
     const info = formatBybitError(err);
 
-    console.error('=== BYBIT DEBUG ===');
+    console.error('=== BYBIT FAILURE ===');
     console.error('context:', context);
     console.error('method:', info.method);
     console.error('url:', info.url);
@@ -64,12 +67,18 @@ async function safeBybitRequest(fn, context = 'request') {
     console.error('rawData:', JSON.stringify(info.rawData, null, 2));
     console.error('axios message:', info.message);
     console.error('stack:', err?.stack);
-    console.error('==================');
+    console.error('====================');
 
     const status = err?.response?.status;
+
     if ([400, 402, 403, 404, 429].includes(status)) {
-      console.warn(`[Bybit ${context}] skipped due to ${status}:`, err?.response?.data || err.message);
-      return null;
+      console.error(`[Bybit ${context}] HTTP ${status}: ${info.retMsg || info.message}`);
+
+      if (swallowHttpErrors) {
+        return null;
+      }
+
+      throw err; // preserve original axios error
     }
 
     throw err;
@@ -78,6 +87,7 @@ async function safeBybitRequest(fn, context = 'request') {
 
 function normalizeUsdtSymbol(symbol, contractType = 'LinearPerpetual') {
   if (!symbol) return null;
+
   const s = String(symbol).trim().toUpperCase();
   if (!s) return null;
 
@@ -121,13 +131,12 @@ async function fetchAllSymbols() {
         client.get('/v5/market/instruments-info', {
           params: requestParams
         }),
-      'fetchAllSymbols'
+      'fetchAllSymbols',
+      { swallowHttpErrors: false }
     );
 
     if (!res) {
-      if (!cursor) break;
-      cursor = null;
-      continue;
+      throw new Error('fetchAllSymbols returned null; upstream request failed.');
     }
 
     const page = res?.data?.result?.list || [];
