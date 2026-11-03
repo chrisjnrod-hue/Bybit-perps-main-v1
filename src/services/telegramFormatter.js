@@ -15,7 +15,7 @@ function formatRecommendationTelegram(item) {
     .join(' | ');
 
   return [
-    `🎯 **Recommended Trade: ${item.symbol}**`,
+    `Recommended Trade: ${item.symbol}`,
     `Action: ${item.action}`,
     `Custom Score: ${item.customScore}`,
     `TV Score: ${item.tvScore}`,
@@ -32,7 +32,7 @@ function formatSignalBlock(signal) {
     .join(' | ');
 
   return [
-    `📊 **Signal Update: ${signal.symbol}**`,
+    `Signal Update: ${signal.symbol}`,
     `Time: ${signal.time}`,
     `Decision: ${signal.decision}`,
     `Reason: ${signal.reason}`,
