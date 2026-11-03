@@ -26,12 +26,16 @@ async function sendTelegramMessage(text, options = {}) {
     telegramDedupe.set(dedupeKey, now);
   }
 
+  const safeText = String(text ?? '').slice(0, 4096);
+
   return axios.post(
     buildRequestUrl(),
     {
       chat_id: config.TELEGRAM_CHAT_ID,
-      text,
-      parse_mode: 'Markdown'
+      text: safeText
+    },
+    {
+      timeout: 10000
     }
   );
 }
