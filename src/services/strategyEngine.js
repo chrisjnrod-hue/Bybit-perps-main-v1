@@ -326,8 +326,7 @@ async function handleWebSocketKline(msg) {
   try {
     await saveKline(symbol, timeframe, candle);
 
-    // You said: no waiting for boundary scan. This evaluates the signal
-    // immediately when the latest 5m/15m/1h/4h candle flips positive.
+    // This evaluates immediately when the latest 5m/15m/1h/4h candle flips.
     await evaluateAndDispatchSymbol(symbol, {
       sendAlert: true,
       sendRecommendation: true
@@ -370,13 +369,6 @@ async function bootstrapStrategy() {
   const startupScanLimit = getStartupScanLimit();
   const startupSymbols =
     startupScanLimit > 0 ? symbols.slice(0, startupScanLimit) : symbols;
-  const startupDelayMs = getStartupScanDelayMs();
-  const startupTimeframes = getStartupTimeframes();
-
-  console.log(
-    `Starting startup scan across ${startupSymbols.length} of ${symbols.length} symbols; ` +
-    `timeframes=${startupTimeframes.join(',')}; delay=${startupDelayMs}ms`
-  );
 
   const startupSignals = [];
   const startupAlerts = [];
@@ -384,13 +376,25 @@ async function bootstrapStrategy() {
 
   for (const symbol of startupSymbols) {
     try {
-      if (startupDelayMs > 0) {
-        await delay(startupDelayMs);
+      const dailyCandles = await fetchKlines(symbol, 'D', 200);
+
+      if (!dailyCandles || dailyCandles.length < 26) {
+        continue;
       }
 
-      const candlesByTf = await fetchCandlesForSymbol(symbol, startupTimeframes);
+      const dailyRootCheck = await evaluateSignal(symbol, { D: dailyCandles }, {});
+      if (!dailyRootCheck) continue;
+
+      const byTf = {
+        D: dailyCandles,
+        '5': await fetchKlines(symbol, '5', 200),
+        '15': await fetchKlines(symbol, '15', 200),
+        '60': await fetchKlines(symbol, '60', 200),
+        '240': await fetchKlines(symbol, '240', 200)
+      };
+
       const marketData = await getMarketDataCached(symbol);
-      const signal = await evaluateSignal(symbol, candlesByTf, marketData);
+      const signal = await evaluateSignal(symbol, byTf, marketData);
 
       if (!signal) continue;
 
@@ -439,7 +443,10 @@ async function bootstrapStrategy() {
     }
   }
 
-  // Startup summary: include all root 1D signals, not just aligned trade signals.
+  // Startup order:
+  // 1) summary block
+  // 2) MTF alignment alerts
+  // 3) recommendation blocks
   const summaryChunks = formatSummaryTelegramChunks(startupSignals);
 
   for (let i = 0; i < summaryChunks.length; i++) {
@@ -449,7 +456,6 @@ async function bootstrapStrategy() {
     );
   }
 
-  // Then MTF alignment alerts for aligned signals.
   for (const item of startupAlerts) {
     await maybeSendAlignmentAlert(item.signal, item.marketData);
     if (config.TELEGRAM_SEND_DELAY_MS > 0) {
@@ -457,7 +463,6 @@ async function bootstrapStrategy() {
     }
   }
 
-  // Then recommendation blocks.
   for (const item of startupRecommendations) {
     await sendTelegramBlock(
       item.text,
@@ -471,6 +476,7 @@ async function bootstrapStrategy() {
   if (config.ENABLE_BOUNDARY_SCAN) {
     setInterval(async () => {
       if (boundaryScanRunning) return;
+
       boundaryScanRunning = true;
 
       try {
