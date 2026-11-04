@@ -51,7 +51,7 @@ function evaluateMtfAlignment(candlesByTf = {}, dailyHistogramDirection = 'neutr
     neutral,
     dailyHistogramDirection,
     aligned: alignedWithDaily,
-    alignedWithDaily
+    alignedWithDaily: alignedWithDaily
   };
 }
 
