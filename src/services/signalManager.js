@@ -37,26 +37,21 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
         ? 'negative'
         : 'neutral';
 
-  const dailyFlipPositive =
-    detectBullishHistogramFlip(daily);
+  const positiveFlip = detectBullishHistogramFlip(daily);
 
   // 1D root signal:
-  // - above 7MA
-  // - OR below 7MA but current histogram just flipped positive
-  const rootSignal =
-    aboveMa7 || (!aboveMa7 && dailyFlipPositive);
+  // - current price/open above 7MA
+  // - OR below 7MA but the latest daily histogram has just flipped positive
+  const rootSignal = aboveMa7 || (!aboveMa7 && positiveFlip);
 
   if (!rootSignal) return null;
 
-  const mtf = evaluateMtfAlignment(
-    {
-      '5': candlesByTf['5'] || [],
-      '15': candlesByTf['15'] || [],
-      '60': candlesByTf['60'] || [],
-      '240': candlesByTf['240'] || []
-    },
-    dailyHistogramDirection
-  );
+  const mtf = evaluateMtfAlignment({
+    '5': candlesByTf['5'] || [],
+    '15': candlesByTf['15'] || [],
+    '60': candlesByTf['60'] || [],
+    '240': candlesByTf['240'] || []
+  });
 
   const liquidity = checkLiquidity(
     {
@@ -69,29 +64,30 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   );
 
   const score = calculateCustomRating({
-    macdFlip: dailyFlipPositive,
+    macdFlip: positiveFlip,
     openAboveMa7: aboveMa7,
     mtfStatus: mtf.status,
     liquidityValid: liquidity.valid,
-    marketTrend: mtf.alignedWithDaily ? 'strong' : 'mixed',
+    marketTrend: mtf.aligned ? 'strong' : 'mixed',
     priceBelow14Ma: false
   });
 
   const tv = await getTradingViewRating(symbol);
   const previousState = await getMtfState(symbol, 'D');
 
+  // Accept only if 1D root signal exists and all required MTF histograms are positive.
   const decision =
-    mtf.alignedWithDaily && score.score >= 65 && liquidity.valid
+    mtf.aligned && score.score >= 65 && liquidity.valid
       ? 'accept'
       : 'monitor';
 
   let reason = '1D root signal';
-  if (aboveMa7 && dailyFlipPositive) {
-    reason = '1D above 7MA and positive MACD flip';
+  if (aboveMa7 && positiveFlip) {
+    reason = '1D above 7MA and positive hist flip';
   } else if (aboveMa7) {
     reason = '1D above 7MA';
-  } else if (dailyFlipPositive) {
-    reason = '1D below 7MA with positive MACD flip';
+  } else if (positiveFlip) {
+    reason = '1D below 7MA with positive hist flip';
   }
 
   const signal = {
@@ -102,7 +98,7 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     reason,
     dailyHistogram: currentDailyHistogram,
     dailyHistogramDirection,
-    macdFlip: dailyFlipPositive,
+    macdFlip: positiveFlip,
     openAboveMa7,
     priceAboveMa7,
     customScore: score.score,
@@ -111,8 +107,8 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     tvScoreLabel: tv.label,
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
-    mtfAligned: mtf.alignedWithDaily,
-    mtfAlignedWithDaily: mtf.alignedWithDaily,
+    mtfAligned: mtf.aligned,
+    mtfAlignedWithDaily: mtf.aligned,
     status: decision === 'accept' ? 'new' : 'monitor',
     price: currentPrice,
     liquidity,
