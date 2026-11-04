@@ -1,52 +1,61 @@
-const { currentOpenAboveMA } = require('./ma');
-const { detectBullishHistogramFlip } = require('./macd');
+const { macdHistogram } = require('./macd');
 
-function evaluateMtfAlignment(candlesByTf = {}) {
-  const result = {};
-  let bullish = 0;
-  let negative = 0;
+const REQUIRED_MTF_TFS = ['5', '15', '60', '240'];
 
-  for (const [tf, candles] of Object.entries(candlesByTf)) {
-    if (!Array.isArray(candles) || candles.length < 2) {
-      result[tf] = 'neutral';
-      continue;
-    }
-
-    const flip = detectBullishHistogramFlip(candles);
-    const aboveMa = currentOpenAboveMA(candles, 7);
-
-    if (flip || aboveMa) {
-      result[tf] = 'bullish';
-      bullish += 1;
-    } else {
-      result[tf] = 'negative';
-      negative += 1;
-    }
+function histogramDirection(candles) {
+  if (!Array.isArray(candles) || candles.length < 26) {
+    return 'neutral';
   }
 
-  const total = Object.keys(result).length || 1;
-  const positiveRatio = bullish / total;
+  const histogram = macdHistogram(candles);
+
+  if (histogram > 0) return 'bullish';
+  if (histogram < 0) return 'negative';
+  return 'neutral';
+}
+
+function evaluateMtfAlignment(candlesByTf = {}, dailyHistogramDirection = 'neutral') {
+  const values = {};
+  let bullish = 0;
+  let negative = 0;
+  let neutral = 0;
+
+  for (const tf of REQUIRED_MTF_TFS) {
+    const direction = histogramDirection(candlesByTf[tf] || []);
+    values[tf] = direction;
+
+    if (direction === 'bullish') bullish += 1;
+    else if (direction === 'negative') negative += 1;
+    else neutral += 1;
+  }
 
   let status = 'neutral';
 
-  if (bullish >= Math.max(3, Math.ceil(total * 0.6)) && negative === 0) {
+  if (bullish === REQUIRED_MTF_TFS.length) {
     status = 'bullish';
-  } else if (negative >= Math.max(2, Math.ceil(total * 0.4)) && bullish === 0) {
+  } else if (negative === REQUIRED_MTF_TFS.length) {
     status = 'negative';
-  } else if (bullish > 0 && negative > 0) {
+  } else if (bullish > 0 || negative > 0) {
     status = 'mixed';
   }
 
+  const alignedWithDaily =
+    dailyHistogramDirection !== 'neutral' &&
+    REQUIRED_MTF_TFS.every((tf) => values[tf] === dailyHistogramDirection);
+
   return {
     status,
-    ratio: positiveRatio,
-    values: result,
+    values,
     bullish,
     negative,
-    aligned: status === 'bullish'
+    neutral,
+    dailyHistogramDirection,
+    aligned: alignedWithDaily,
+    alignedWithDaily
   };
 }
 
 module.exports = {
-  evaluateMtfAlignment
+  evaluateMtfAlignment,
+  REQUIRED_MTF_TFS
 };
