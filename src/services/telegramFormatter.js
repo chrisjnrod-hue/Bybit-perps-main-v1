@@ -21,7 +21,11 @@ function formatMtfValues(mtfValues = {}) {
 
 function formatSummaryTelegram(signals) {
   const list = [
-    ...new Set((signals || []).map((signal) => String(signal.symbol || '').toUpperCase()))
+    ...new Set(
+      (signals || [])
+        .map((signal) => String(signal?.symbol || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
   ].sort();
 
   return [
@@ -29,6 +33,42 @@ function formatSummaryTelegram(signals) {
     'A-Z list:',
     ...list.map((symbol) => `${symbol}: 1`)
   ].join('\n');
+}
+
+function formatSummaryTelegramChunks(signals, maxLength = 3500) {
+  const symbols = [
+    ...new Set(
+      (signals || [])
+        .map((signal) => String(signal?.symbol || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
+  ].sort();
+
+  const header = `Valid 1D signals: ${symbols.length}\nA-Z list:`;
+
+  const chunks = [];
+  let lines = [];
+  let currentLength = header.length;
+
+  for (const symbol of symbols) {
+    const line = `${symbol}: 1`;
+    const pendingLength = line.length + 1;
+
+    if (lines.length && currentLength + pendingLength > maxLength) {
+      chunks.push(`${header}\n${lines.join('\n')}`);
+      lines = [];
+      currentLength = header.length;
+    }
+
+    lines.push(line);
+    currentLength += pendingLength;
+  }
+
+  if (lines.length || chunks.length === 0) {
+    chunks.push(`${header}\n${lines.join('\n')}`);
+  }
+
+  return chunks;
 }
 
 function formatMtfAlignmentAlert(signal) {
@@ -68,6 +108,7 @@ function formatRecommendationTelegram(item) {
 
 module.exports = {
   formatSummaryTelegram,
+  formatSummaryTelegramChunks,
   formatMtfAlignmentAlert,
   formatRecommendationTelegram
 };
