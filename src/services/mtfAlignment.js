@@ -7,51 +7,38 @@ function histogramDirection(candles) {
     return 'neutral';
   }
 
-  const histogram = macdHistogram(candles);
+  const value = macdHistogram(candles);
 
-  if (histogram > 0) return 'bullish';
-  if (histogram < 0) return 'negative';
+  if (value > 0) return 'bullish';
+  if (value < 0) return 'negative';
   return 'neutral';
 }
 
-function evaluateMtfAlignment(candlesByTf = {}, dailyHistogramDirection = 'neutral') {
+function evaluateMtfAlignment(candlesByTf = {}) {
   const values = {};
-  let bullish = 0;
-  let negative = 0;
-  let neutral = 0;
 
   for (const tf of REQUIRED_MTF_TFS) {
-    const direction = histogramDirection(candlesByTf[tf] || []);
-    values[tf] = direction;
-
-    if (direction === 'bullish') bullish += 1;
-    else if (direction === 'negative') negative += 1;
-    else neutral += 1;
+    values[tf] = histogramDirection(candlesByTf[tf] || []);
   }
 
-  let status = 'neutral';
+  const bullishCount = REQUIRED_MTF_TFS.filter((tf) => values[tf] === 'bullish').length;
+  const negativeCount = REQUIRED_MTF_TFS.filter((tf) => values[tf] === 'negative').length;
+  const neutralCount = REQUIRED_MTF_TFS.filter((tf) => values[tf] === 'neutral').length;
 
-  if (bullish === REQUIRED_MTF_TFS.length) {
-    status = 'bullish';
-  } else if (negative === REQUIRED_MTF_TFS.length) {
-    status = 'negative';
-  } else if (bullish > 0 || negative > 0) {
-    status = 'mixed';
-  }
+  const aligned = bullishCount === REQUIRED_MTF_TFS.length;
 
-  const alignedWithDaily =
-    dailyHistogramDirection !== 'neutral' &&
-    REQUIRED_MTF_TFS.every((tf) => values[tf] === dailyHistogramDirection);
+  let status = 'mixed';
+  if (aligned) status = 'bullish';
+  else if (negativeCount === REQUIRED_MTF_TFS.length) status = 'negative';
+  else if (neutralCount === REQUIRED_MTF_TFS.length) status = 'neutral';
 
   return {
     status,
     values,
-    bullish,
-    negative,
-    neutral,
-    dailyHistogramDirection,
-    aligned: alignedWithDaily,
-    alignedWithDaily: alignedWithDaily
+    aligned,
+    bullish: bullishCount,
+    negative: negativeCount,
+    neutral: neutralCount
   };
 }
 
