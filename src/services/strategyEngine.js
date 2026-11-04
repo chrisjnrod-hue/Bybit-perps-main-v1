@@ -16,7 +16,7 @@ const { shouldOpenTrade, buildTradePlan } = require('./tradeManager');
 const { ensureTradeFromSignal, updateTradeFromMarket } = require('./openTradeTracker');
 const { sendTelegramMessage } = require('./telegram');
 const {
-  formatSummaryTelegram,
+  formatSummaryTelegramChunks,
   formatMtfAlignmentAlert,
   formatRecommendationTelegram
 } = require('./telegramFormatter');
@@ -225,7 +225,7 @@ async function syncOpenTradesFromMarket() {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (!signal?.mtfAlignedWithDaily && !signal?.mtfAligned) return false;
+  if (!signal?.mtfAligned) return false;
 
   const key = dailySignalKey(signal);
   if (sentAlignmentAlerts.has(key)) return false;
@@ -302,7 +302,7 @@ async function evaluateAndDispatchSymbol(symbol, options = {}) {
 
   if (!signal) return null;
 
-  if (sendAlert) {
+  if (sendAlert && signal.mtfAligned) {
     await maybeSendAlignmentAlert(signal, marketData);
   }
 
@@ -326,9 +326,8 @@ async function handleWebSocketKline(msg) {
   try {
     await saveKline(symbol, timeframe, candle);
 
-    // We do not wait for a boundary scan. As soon as the live candle
-    // produces a valid 1D root signal and the 4 MTF MACD directions match,
-    // send the MTF alignment alert immediately.
+    // You said: no waiting for boundary scan. This evaluates the signal
+    // immediately when the latest 5m/15m/1h/4h candle flips positive.
     await evaluateAndDispatchSymbol(symbol, {
       sendAlert: true,
       sendRecommendation: true
@@ -354,6 +353,10 @@ async function bootstrapStrategy() {
     return;
   }
 
+  if (config.DAILY_CLEANUP_INTERVAL_MS) {
+    setInterval(performDailyCleanup, config.DAILY_CLEANUP_INTERVAL_MS);
+  }
+
   if (config.USE_WS) {
     bybitWs.on('kline', handleWebSocketKline);
     bybitWs.connect();
@@ -364,15 +367,16 @@ async function bootstrapStrategy() {
     }
   }
 
-  if (config.DAILY_CLEANUP_INTERVAL_MS) {
-    setInterval(performDailyCleanup, config.DAILY_CLEANUP_INTERVAL_MS);
-  }
-
   const startupScanLimit = getStartupScanLimit();
   const startupSymbols =
     startupScanLimit > 0 ? symbols.slice(0, startupScanLimit) : symbols;
   const startupDelayMs = getStartupScanDelayMs();
   const startupTimeframes = getStartupTimeframes();
+
+  console.log(
+    `Starting startup scan across ${startupSymbols.length} of ${symbols.length} symbols; ` +
+    `timeframes=${startupTimeframes.join(',')}; delay=${startupDelayMs}ms`
+  );
 
   const startupSignals = [];
   const startupAlerts = [];
@@ -392,28 +396,23 @@ async function bootstrapStrategy() {
 
       startupSignals.push(signal);
 
-      if (signal.mtfAlignedWithDaily || signal.mtfAligned) {
+      if (signal.mtfAligned) {
         startupAlerts.push({ signal, marketData });
       }
 
       if (signal.decision === 'accept') {
-        const maxTrades = Number(config.MAX_OPEN_TRADES || 3);
         const openCount = await countOpenTrades();
 
-        if (openCount < maxTrades) {
-          const tradeCheck = shouldOpenTrade(signal, {
+        if (openCount < Number(config.MAX_OPEN_TRADES || 3)) {
+          const conditions = {
             volume24hUsd: Number(marketData.volume24hUsd || 0),
             spreadPct: Number(marketData.spreadPct || 0),
             topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-          });
+          };
 
+          const tradeCheck = shouldOpenTrade(signal, conditions);
           if (tradeCheck.open) {
-            const plan = buildTradePlan(signal, {
-              volume24hUsd: Number(marketData.volume24hUsd || 0),
-              spreadPct: Number(marketData.spreadPct || 0),
-              topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-            });
-
+            const plan = buildTradePlan(signal, conditions);
             const savedTrade = await ensureTradeFromSignal(signal, plan);
 
             if (savedTrade) {
@@ -440,14 +439,17 @@ async function bootstrapStrategy() {
     }
   }
 
-  // Startup order: summary block, then MTF alignment alerts, then recommendation blocks.
-  if (startupSignals.length) {
+  // Startup summary: include all root 1D signals, not just aligned trade signals.
+  const summaryChunks = formatSummaryTelegramChunks(startupSignals);
+
+  for (let i = 0; i < summaryChunks.length; i++) {
     await sendTelegramBlock(
-      formatSummaryTelegram(startupSignals),
-      'summary:startup'
+      summaryChunks[i],
+      `summary:startup:${i + 1}`
     );
   }
 
+  // Then MTF alignment alerts for aligned signals.
   for (const item of startupAlerts) {
     await maybeSendAlignmentAlert(item.signal, item.marketData);
     if (config.TELEGRAM_SEND_DELAY_MS > 0) {
@@ -455,6 +457,7 @@ async function bootstrapStrategy() {
     }
   }
 
+  // Then recommendation blocks.
   for (const item of startupRecommendations) {
     await sendTelegramBlock(
       item.text,
@@ -468,7 +471,6 @@ async function bootstrapStrategy() {
   if (config.ENABLE_BOUNDARY_SCAN) {
     setInterval(async () => {
       if (boundaryScanRunning) return;
-
       boundaryScanRunning = true;
 
       try {
@@ -481,7 +483,7 @@ async function bootstrapStrategy() {
 
           if (!signal) continue;
 
-          if (signal.mtfAlignedWithDaily) {
+          if (signal.mtfAligned) {
             await maybeSendAlignmentAlert(signal, marketData);
           }
 
