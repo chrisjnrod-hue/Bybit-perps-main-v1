@@ -53,7 +53,6 @@ async function safeBybitRequest(fn, context = 'request', options = {}) {
     return await fn();
   } catch (err) {
     const info = formatBybitError(err);
-
     console.error('=== BYBIT FAILURE ===');
     console.error('context:', context);
     console.error('method:', info.method);
@@ -90,22 +89,28 @@ function normalizeUsdtSymbol(symbol, contractType = 'LinearPerpetual') {
   const s = String(symbol).trim().toUpperCase();
   if (!s) return null;
 
-  if (!/USDT(\.P)?$/.test(s)) return null;
+  // ALLOW numeric prefixes like 10000NEXUSDT
+  if (!/^[A-Z0-9]+USDT(\.P)?$/.test(s)) return null;
 
-  if (contractType && String(contractType).trim().toUpperCase() !== 'LINEARPERPETUAL') {
+  if (
+    contractType &&
+    String(contractType).trim().toUpperCase() !== 'LINEARPERPETUAL'
+  ) {
     return null;
   }
 
-  if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(s) || /[0-9]{2}[A-Z]{3}[0-9]{2}/.test(s)) {
-    return null;
-  }
+  if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(s)) return null;
 
-  if (/^[0-9]/.test(s)) return null;
+  const stockSymbols = new Set([
+    'AALUSDT',
+    'AAOIUSDT',
+    'TSLAUSDT',
+    'NVDAUSDT',
+    'AAPLUSDT',
+    'MSFTUSDT'
+  ]);
 
-  const stockSymbols = ['AALUSDT', 'AAOIUSDT', 'TSLAUSDT', 'NVDAUSDT', 'AAPLUSDT', 'MSFTUSDT'];
-  if (stockSymbols.includes(s)) {
-    return null;
-  }
+  if (stockSymbols.has(s)) return null;
 
   return s;
 }
@@ -121,10 +126,6 @@ async function fetchAllSymbols() {
       ...(cursor ? { cursor } : {})
     };
 
-    console.log('[bybitRest] fetchAllSymbols start');
-    console.log('[bybitRest] baseURL =', client.defaults.baseURL);
-    console.log('[bybitRest] request params =', JSON.stringify(requestParams, null, 2));
-
     const res = await safeBybitRequest(
       () =>
         client.get('/v5/market/instruments-info', {
@@ -134,9 +135,7 @@ async function fetchAllSymbols() {
       { swallowHttpErrors: false }
     );
 
-    if (!res) {
-      throw new Error('fetchAllSymbols returned null; upstream request failed.');
-    }
+    if (!res) throw new Error('fetchAllSymbols returned null; upstream request failed.');
 
     const page = res?.data?.result?.list || [];
 
@@ -158,9 +157,7 @@ async function fetchAllSymbols() {
   }
 
   const dedup = new Map();
-  for (const item of list) {
-    dedup.set(item.symbol, item);
-  }
+  for (const item of list) dedup.set(item.symbol, item);
 
   return [...dedup.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
 }
@@ -168,7 +165,6 @@ async function fetchAllSymbols() {
 async function fetchKlines(symbol, interval = 'D', limit = 200) {
   const cleanSymbol = String(symbol || '').toUpperCase().trim();
   const cleanInterval = String(interval || 'D').trim();
-
   const enforcedLimit = Math.min(200, Math.max(1, Number(limit) || 200));
 
   try {
@@ -190,27 +186,29 @@ async function fetchKlines(symbol, interval = 'D', limit = 200) {
 
     const rows = res?.data?.result?.list || [];
 
-    return rows.map((row) => {
-      if (Array.isArray(row)) {
-        return {
-          open_time: Number(row[0] || 0),
-          open: Number(row[1] || 0),
-          high: Number(row[2] || 0),
-          low: Number(row[3] || 0),
-          close: Number(row[4] || 0),
-          volume: Number(row[5] || 0)
-        };
-      }
+    return rows
+      .map((row) => {
+        if (Array.isArray(row)) {
+          return {
+            open_time: Number(row[0] || 0),
+            open: Number(row[1] || 0),
+            high: Number(row[2] || 0),
+            low: Number(row[3] || 0),
+            close: Number(row[4] || 0),
+            volume: Number(row[5] || 0)
+          };
+        }
 
-      return {
-        open_time: Number(row.start || 0),
-        open: Number(row.open || 0),
-        high: Number(row.high || 0),
-        low: Number(row.low || 0),
-        close: Number(row.close || 0),
-        volume: Number(row.volume || 0)
-      };
-    });
+        return {
+          open_time: Number(row.start || 0),
+          open: Number(row.open || 0),
+          high: Number(row.high || 0),
+          low: Number(row.low || 0),
+          close: Number(row.close || 0),
+          volume: Number(row.volume || 0)
+        };
+      })
+      .sort((a, b) => a.open_time - b.open_time);
   } catch (err) {
     console.error('[bybitRest] v5 kline fetch failed permanently', {
       symbol: cleanSymbol,
@@ -254,9 +252,7 @@ async function fetchOrderBook(symbol, limit = 25) {
     `fetchOrderBook:${symbol}`
   );
 
-  if (!res) {
-    return { bids: [], asks: [] };
-  }
+  if (!res) return { bids: [], asks: [] };
 
   const result = res?.data?.result || {};
   return {
@@ -291,7 +287,7 @@ function getSeedSymbols(symbols) {
     if (!item || !item.symbol) return false;
 
     const symbol = String(item.symbol).trim().toUpperCase();
-    return /USDT(\.P)?$/.test(symbol) && !/USDT[QHUZ0-9]/.test(symbol.slice(-6));
+    return /[A-Z0-9]+USDT(\.P)?$/.test(symbol) && !/USDT[QHUZ0-9]/.test(symbol.slice(-6));
   });
 }
 
