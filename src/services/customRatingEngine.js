@@ -1,25 +1,34 @@
-function calculateCustomRating(signal) {
-  let score = 0;
-  if (signal.macdFlip) score += 25;
-  if (signal.openAboveMa7) score += 20;
-  if (signal.mtfStatus === 'bullish') score += 20;
-  if (signal.mtfStatus === 'mixed') score -= 15;
-  if (signal.mtfStatus === 'negative') score -= 25;
-  if (signal.liquidityValid) score += 15;
-  else score -= 20;
-  if (signal.marketTrend === 'strong') score += 10;
-  if (signal.priceBelow14Ma) score -= 20;
+function labelForScore(score) {
+  if (score >= 80) return 'StrongBuy';
+  if (score >= 65) return 'Buy';
+  if (score >= 45) return 'Neutral';
+  return 'Sell';
+}
 
-  score = Math.max(0, Math.min(100, score));
+function calculateCustomRating(signal = {}) {
+  const components = {
+    macdFlip: signal.macdFlip ? 25 : 0,
+    openAboveMa7: signal.openAboveMa7 ? 20 : 0,
+    mtfStatus:
+      signal.mtfStatus === 'bullish'
+        ? 20
+        : signal.mtfStatus === 'mixed'
+          ? -15
+          : signal.mtfStatus === 'negative'
+            ? -25
+            : 0,
+    liquidity: signal.liquidityValid ? 15 : -20,
+    marketTrend: signal.marketTrend === 'strong' ? 10 : 0,
+    priceBelow14Ma: signal.priceBelow14Ma ? -20 : 0
+  };
 
-  let label = 'Sell';
-  if (score >= 80) label = 'StrongBuy';
-  else if (score >= 65) label = 'Buy';
-  else if (score >= 45) label = 'Neutral';
+  const rawScore = Object.values(components).reduce((total, value) => total + value, 0);
+  const score = Math.max(0, Math.min(100, rawScore));
 
   return {
     score,
-    label
+    label: labelForScore(score),
+    components
   };
 }
 
