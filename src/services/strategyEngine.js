@@ -11,7 +11,10 @@ const {
   countOpenTrades
 } = require('../db');
 const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
-const { evaluateSignal } = require('./signalManager');
+const {
+  evaluateSignal,
+  detectDailyRootSignal
+} = require('./signalManager');
 const { shouldOpenTrade, buildTradePlan } = require('./tradeManager');
 const { ensureTradeFromSignal, updateTradeFromMarket } = require('./openTradeTracker');
 const { sendTelegramMessage } = require('./telegram');
@@ -225,20 +228,25 @@ async function syncOpenTradesFromMarket() {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (!signal?.mtfAligned) return false;
+  // MTF alert only for accepted + aligned signals.
+  if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
+    return false;
+  }
 
   const key = dailySignalKey(signal);
   if (sentAlignmentAlerts.has(key)) return false;
 
-  sentAlignmentAlerts.add(key);
-
   try {
-    return Boolean(
-      await sendTelegramBlock(
-        formatMtfAlignmentAlert(alertData(signal, marketData)),
-        buildSignalDedupeKey(signal, 'mtf-alignment')
-      )
+    const result = await sendTelegramBlock(
+      formatMtfAlignmentAlert(alertData(signal, marketData)),
+      buildSignalDedupeKey(signal, 'mtf-alignment')
     );
+
+    if (result) {
+      sentAlignmentAlerts.add(key);
+    }
+
+    return Boolean(result);
   } catch (err) {
     console.error(`MTF alignment alert failed for ${signal.symbol}:`, err.message);
     return false;
@@ -250,8 +258,6 @@ async function maybeSendRecommendation(signal, marketData) {
 
   const key = dailySignalKey(signal);
   if (sentRecommendations.has(key)) return false;
-
-  sentRecommendations.add(key);
 
   try {
     const openCount = await countOpenTrades();
@@ -271,22 +277,26 @@ async function maybeSendRecommendation(signal, marketData) {
 
     if (!savedTrade) return false;
 
-    return Boolean(
-      await sendTelegramBlock(
-        formatRecommendationTelegram({
-          symbol: signal.symbol,
-          action: 'open',
-          customScore: signal.customScore,
-          tvScore: signal.tvScore,
-          mtfStatus: signal.mtfStatus,
-          mtfValues: signal.mtfValues,
-          liquidity: signal.liquidity?.valid ? 'valid' : 'invalid',
-          reason: signal.reason,
-          plan
-        }),
-        buildSignalDedupeKey(signal, 'recommendation')
-      )
+    const result = await sendTelegramBlock(
+      formatRecommendationTelegram({
+        symbol: signal.symbol,
+        action: 'open',
+        customScore: signal.customScore,
+        tvScore: signal.tvScore,
+        mtfStatus: signal.mtfStatus,
+        mtfValues: signal.mtfValues,
+        liquidity: signal.liquidity?.valid ? 'valid' : 'invalid',
+        reason: signal.reason,
+        plan
+      }),
+      buildSignalDedupeKey(signal, 'recommendation')
     );
+
+    if (result) {
+      sentRecommendations.add(key);
+    }
+
+    return Boolean(result);
   } catch (err) {
     console.error(`Trade recommendation failed for ${signal.symbol}:`, err.message);
     return false;
@@ -302,7 +312,7 @@ async function evaluateAndDispatchSymbol(symbol, options = {}) {
 
   if (!signal) return null;
 
-  if (sendAlert && signal.mtfAligned) {
+  if (sendAlert && signal.decision === 'accept' && signal.mtfAligned) {
     await maybeSendAlignmentAlert(signal, marketData);
   }
 
@@ -326,7 +336,6 @@ async function handleWebSocketKline(msg) {
   try {
     await saveKline(symbol, timeframe, candle);
 
-    // Immediate evaluation on live updates, no boundary-scan wait.
     await evaluateAndDispatchSymbol(symbol, {
       sendAlert: true,
       sendRecommendation: true
@@ -376,18 +385,24 @@ async function bootstrapStrategy() {
 
   for (const symbol of startupSymbols) {
     try {
+      // Root detection is a side-effect-free check. Use it to decide whether to
+      // fetch MTF candles and market data. This avoids duplicate writes.
       const dailyCandles = await fetchKlines(symbol, 'D', 200);
 
-      if (!dailyCandles || dailyCandles.length < 26) {
-        continue;
-      }
+      if (!dailyCandles || dailyCandles.length < 26) continue;
 
-      // Root-signal check only (no DB writes). This is the correct source
-      // for the summary block, because the summary must contain ALL root 1D signals.
-      const dailyRootCheck = await evaluateSignal(symbol, { D: dailyCandles }, {});
-      if (!dailyRootCheck) continue;
+      const rootCandidate = detectDailyRootSignal(dailyCandles, {
+        symbol,
+        lastPrice: 0
+      });
 
-      startupSignals.push(dailyRootCheck);
+      if (!rootCandidate) continue;
+
+      startupSignals.push({
+        symbol,
+        dailyCandleTime: rootCandidate.dailyCandleTime,
+        reason: rootCandidate.reason
+      });
 
       const byTf = {
         D: dailyCandles,
@@ -402,7 +417,7 @@ async function bootstrapStrategy() {
 
       if (!signal) continue;
 
-      if (signal.mtfAligned) {
+      if (signal.decision === 'accept' && signal.mtfAligned) {
         startupAlerts.push({ signal, marketData });
       }
 
@@ -417,6 +432,7 @@ async function bootstrapStrategy() {
           };
 
           const tradeCheck = shouldOpenTrade(signal, conditions);
+
           if (tradeCheck.open) {
             const plan = buildTradePlan(signal, conditions);
             const savedTrade = await ensureTradeFromSignal(signal, plan);
@@ -445,6 +461,7 @@ async function bootstrapStrategy() {
     }
   }
 
+  // Startup summary: every daily root signal candidate.
   const summaryChunks = formatSummaryTelegramChunks(startupSignals);
 
   for (let i = 0; i < summaryChunks.length; i++) {
@@ -454,6 +471,7 @@ async function bootstrapStrategy() {
     );
   }
 
+  // Only send alignment alert blocks for accepted + aligned signals.
   for (const item of startupAlerts) {
     await maybeSendAlignmentAlert(item.signal, item.marketData);
     if (config.TELEGRAM_SEND_DELAY_MS > 0) {
@@ -479,15 +497,43 @@ async function bootstrapStrategy() {
 
       try {
         const activeSymbols = await seedSymbols();
+        const newRootSignals = [];
+        const seenRootKeys = new Set();
 
         for (const symbol of activeSymbols) {
-          const candlesByTf = await getStoredCandles(symbol);
+          const dailyCandles = await fetchKlines(symbol, 'D', 200);
+
+          if (!dailyCandles || dailyCandles.length < 26) {
+            continue;
+          }
+
+          const root = detectDailyRootSignal(dailyCandles, { symbol });
+          if (!root) continue;
+
+          const key = `${symbol}:${root.dailyCandleTime}`;
+          if (seenRootKeys.has(key)) continue;
+          seenRootKeys.add(key);
+
+          newRootSignals.push({
+            symbol,
+            dailyCandleTime: root.dailyCandleTime,
+            reason: root.reason
+          });
+
+          const byTf = {
+            D: dailyCandles,
+            '5': await fetchKlines(symbol, '5', 200),
+            '15': await fetchKlines(symbol, '15', 200),
+            '60': await fetchKlines(symbol, '60', 200),
+            '240': await fetchKlines(symbol, '240', 200)
+          };
+
           const marketData = await getMarketDataCached(symbol);
-          const signal = await evaluateSignal(symbol, candlesByTf, marketData);
+          const signal = await evaluateSignal(symbol, byTf, marketData);
 
           if (!signal) continue;
 
-          if (signal.mtfAligned) {
+          if (signal.decision === 'accept' && signal.mtfAligned) {
             await maybeSendAlignmentAlert(signal, marketData);
           }
 
@@ -496,6 +542,17 @@ async function bootstrapStrategy() {
           }
 
           await delay(50);
+        }
+
+        if (newRootSignals.length) {
+          const chunks = formatSummaryTelegramChunks(newRootSignals);
+
+          for (let i = 0; i < chunks.length; i++) {
+            await sendTelegramBlock(
+              chunks[i],
+              `summary:boundary:${i + 1}`
+            );
+          }
         }
       } catch (err) {
         console.error('Boundary scan failed:', err);
