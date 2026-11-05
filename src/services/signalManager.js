@@ -39,10 +39,8 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  // 1D root signal:
-  // - current price/open above 7MA
-  // - OR below 7MA but the latest daily histogram has just flipped positive
-  const rootSignal = aboveMa7 || (!aboveMa7 && positiveFlip);
+  const rootSignal =
+    aboveMa7 || (!aboveMa7 && positiveFlip);
 
   if (!rootSignal) return null;
 
@@ -75,9 +73,10 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const tv = await getTradingViewRating(symbol);
   const previousState = await getMtfState(symbol, 'D');
 
-  // Accept only if 1D root signal exists and all required MTF histograms are positive.
+  // Do not gate on custom score unless you intentionally want a score threshold.
+  // The user requirement is: root signal + MTF positive alignment.
   const decision =
-    mtf.aligned && score.score >= 65 && liquidity.valid
+    mtf.aligned && liquidity.valid
       ? 'accept'
       : 'monitor';
 
@@ -108,7 +107,6 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
     mtfAligned: mtf.aligned,
-    mtfAlignedWithDaily: mtf.aligned,
     status: decision === 'accept' ? 'new' : 'monitor',
     price: currentPrice,
     liquidity,
