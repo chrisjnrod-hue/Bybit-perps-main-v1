@@ -326,7 +326,7 @@ async function handleWebSocketKline(msg) {
   try {
     await saveKline(symbol, timeframe, candle);
 
-    // This evaluates immediately when the latest 5m/15m/1h/4h candle flips.
+    // Immediate evaluation on live updates, no boundary-scan wait.
     await evaluateAndDispatchSymbol(symbol, {
       sendAlert: true,
       sendRecommendation: true
@@ -382,8 +382,12 @@ async function bootstrapStrategy() {
         continue;
       }
 
+      // Root-signal check only (no DB writes). This is the correct source
+      // for the summary block, because the summary must contain ALL root 1D signals.
       const dailyRootCheck = await evaluateSignal(symbol, { D: dailyCandles }, {});
       if (!dailyRootCheck) continue;
+
+      startupSignals.push(dailyRootCheck);
 
       const byTf = {
         D: dailyCandles,
@@ -397,8 +401,6 @@ async function bootstrapStrategy() {
       const signal = await evaluateSignal(symbol, byTf, marketData);
 
       if (!signal) continue;
-
-      startupSignals.push(signal);
 
       if (signal.mtfAligned) {
         startupAlerts.push({ signal, marketData });
@@ -443,10 +445,6 @@ async function bootstrapStrategy() {
     }
   }
 
-  // Startup order:
-  // 1) summary block
-  // 2) MTF alignment alerts
-  // 3) recommendation blocks
   const summaryChunks = formatSummaryTelegramChunks(startupSignals);
 
   for (let i = 0; i < summaryChunks.length; i++) {
