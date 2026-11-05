@@ -11,36 +11,72 @@ function ema(values, period) {
   return result;
 }
 
-function macdHistogram(candles, fast = 12, slow = 26, signal = 9) {
-  const closes = candles.map((candle) => Number(candle.close || 0));
-  if (closes.length < slow) return 0;
+function macdSeries(candles) {
+  const closes = candles.map((c) => Number(c.close || 0));
+  if (closes.length < 26) {
+    return { macd: [], signalLine: [], histogram: [] };
+  }
 
-  const fastEma = ema(closes, fast);
-  const slowEma = ema(closes, slow);
-  const macd = fastEma - slowEma;
-  const signalLine = macd * (2 / (signal + 1));
-  return macd - signalLine;
+  const fastEma = [];
+  const slowEma = [];
+  const fastK = 2 / (12 + 1);
+  const slowK = 2 / (26 + 1);
+
+  let fastPrev = null;
+  let slowPrev = null;
+
+  for (const close of closes) {
+    if (fastPrev === null) {
+      fastPrev = close;
+    } else {
+      fastPrev = close * fastK + fastPrev * (1 - fastK);
+    }
+    fastEma.push(fastPrev);
+
+    if (slowPrev === null) {
+      slowPrev = close;
+    } else {
+      slowPrev = close * slowK + slowPrev * (1 - slowK);
+    }
+    slowEma.push(slowPrev);
+  }
+
+  const macd = fastEma.map((value, i) => value - slowEma[i]);
+
+  const signalLine = [];
+  const signalK = 2 / (9 + 1);
+  let prevSignal = macd[0];
+
+  for (const value of macd) {
+    prevSignal = value * signalK + prevSignal * (1 - signalK);
+    signalLine.push(prevSignal);
+  }
+
+  const histogram = macd.map((value, i) => value - signalLine[i]);
+
+  return { macd, signalLine, histogram };
+}
+
+function macdHistogram(candles) {
+  const { histogram } = macdSeries(candles);
+  return histogram.length ? histogram[histogram.length - 1] : 0;
 }
 
 function detectBullishHistogramFlip(candles) {
   if (!Array.isArray(candles) || candles.length < 2) return false;
 
-  const hist = [];
-  for (let i = 0; i < candles.length; i++) {
-    const window = candles.slice(0, i + 1);
-    hist.push(macdHistogram(window));
-  }
+  const { histogram } = macdSeries(candles);
+  if (histogram.length < 2) return false;
 
-  if (hist.length < 2) return false;
-
-  const prev = hist[hist.length - 2];
-  const curr = hist[hist.length - 1];
+  const prev = histogram[histogram.length - 2];
+  const curr = histogram[histogram.length - 1];
 
   return prev <= 0 && curr > 0;
 }
 
 module.exports = {
   ema,
+  macdSeries,
   macdHistogram,
   detectBullishHistogramFlip
 };
