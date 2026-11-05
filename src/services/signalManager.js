@@ -14,6 +14,40 @@ function getCurrentPrice(ticker, latestDailyCandle) {
   return Number(latestDailyCandle?.close || latestDailyCandle?.open || 0);
 }
 
+function detectDailyRootSignal(daily = [], ticker = {}) {
+  if (!Array.isArray(daily) || daily.length < 26) return null;
+
+  const latest = daily[daily.length - 1];
+  const currentOpen = Number(latest?.open || 0);
+  const currentPrice = getCurrentPrice(ticker, latest);
+
+  const priorCloses = daily
+    .slice(0, -1)
+    .map((candle) => Number(candle.close || 0));
+
+  if (priorCloses.length < 7) return null;
+
+  const ma7 = sma(priorCloses, 7);
+  const openAboveMa7 = currentOpen > ma7;
+  const priceAboveMa7 = currentPrice > ma7;
+  const aboveMa7 = openAboveMa7 || priceAboveMa7;
+  const positiveFlip = detectBullishHistogramFlip(daily);
+
+  if (!aboveMa7 && !positiveFlip) return null;
+
+  return {
+    symbol: ticker.symbol || null,
+    dailyCandleTime: Number(latest?.open_time || 0) || null,
+    openAboveMa7,
+    priceAboveMa7,
+    positiveFlip,
+    price: currentPrice,
+    reason: aboveMa7
+      ? '1D open/current price above 7MA'
+      : '1D below 7MA with current positive histogram flip'
+  };
+}
+
 async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
   if (daily.length < 26) return null;
@@ -73,8 +107,9 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const tv = await getTradingViewRating(symbol);
   const previousState = await getMtfState(symbol, 'D');
 
-  // Do not gate on custom score unless you intentionally want a score threshold.
-  // The user requirement is: root signal + MTF positive alignment.
+  // A signal is only sent as an MTF alignment alert when it is both:
+  // 1) a valid root signal
+  // 2) all four MTF histograms are positive
   const decision =
     mtf.aligned && liquidity.valid
       ? 'accept'
@@ -123,5 +158,6 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 }
 
 module.exports = {
-  evaluateSignal
+  evaluateSignal,
+  detectDailyRootSignal
 };
