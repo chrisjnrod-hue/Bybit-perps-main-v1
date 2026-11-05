@@ -14,30 +14,46 @@ async function sendTelegramMessage(text, options = {}) {
   } = options;
 
   if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_CHAT_ID) {
+    console.warn('[telegram] Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID; skipping send.');
     return null;
   }
 
   if (dedupeKey) {
     const now = Date.now();
     const lastAt = telegramDedupe.get(dedupeKey);
+
     if (lastAt && now - lastAt < ttlMs) {
       return null;
     }
-    telegramDedupe.set(dedupeKey, now);
   }
 
   const safeText = String(text ?? '').slice(0, 4096);
 
-  return axios.post(
-    buildRequestUrl(),
-    {
-      chat_id: config.TELEGRAM_CHAT_ID,
-      text: safeText
-    },
-    {
-      timeout: 10000
+  try {
+    const res = await axios.post(
+      buildRequestUrl(),
+      {
+        chat_id: config.TELEGRAM_CHAT_ID,
+        text: safeText
+      },
+      {
+        timeout: 10000
+      }
+    );
+
+    if (dedupeKey) {
+      telegramDedupe.set(dedupeKey, Date.now());
     }
-  );
+
+    return res;
+  } catch (err) {
+    console.error('[telegram] send failed:', {
+      message: err?.message,
+      status: err?.response?.status,
+      data: err?.response?.data
+    });
+    return null;
+  }
 }
 
 module.exports = {
