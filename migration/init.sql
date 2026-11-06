@@ -1,79 +1,71 @@
-CREATE TABLE IF NOT EXISTS symbols (
-  symbol TEXT PRIMARY KEY,
-  base TEXT NOT NULL,
-  quote TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active',
-  updated_at BIGINT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS klines (
-  symbol TEXT NOT NULL,
-  timeframe TEXT NOT NULL,
-  open_time BIGINT NOT NULL,
-  open DOUBLE PRECISION NOT NULL DEFAULT 0,
-  high DOUBLE PRECISION NOT NULL DEFAULT 0,
-  low DOUBLE PRECISION NOT NULL DEFAULT 0,
-  close DOUBLE PRECISION NOT NULL DEFAULT 0,
-  volume DOUBLE PRECISION NOT NULL DEFAULT 0,
-  PRIMARY KEY (symbol, timeframe, open_time)
-);
-
-CREATE INDEX IF NOT EXISTS klines_symbol_timeframe_open_time_idx
-  ON klines (symbol, timeframe, open_time);
-
-CREATE TABLE IF NOT EXISTS open_trades (
-  id BIGSERIAL PRIMARY KEY,
-  symbol TEXT NOT NULL UNIQUE,
-  side TEXT NOT NULL DEFAULT 'buy',
-  status TEXT NOT NULL DEFAULT 'open',
-  entry_price DOUBLE PRECISION NOT NULL DEFAULT 0,
-  stop_loss DOUBLE PRECISION NOT NULL DEFAULT 0,
-  take_profit DOUBLE PRECISION NOT NULL DEFAULT 0,
-  trailing_stop DOUBLE PRECISION NOT NULL DEFAULT 0,
-  score DOUBLE PRECISION NOT NULL DEFAULT 0,
-  reason TEXT,
-  created_at BIGINT NOT NULL,
-  updated_at BIGINT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS open_trades_status_created_at_idx
-  ON open_trades (status, created_at DESC);
-
+-- 1) Ensure the signals table exists with the required columns
 CREATE TABLE IF NOT EXISTS signals (
   id BIGSERIAL PRIMARY KEY,
   symbol TEXT NOT NULL,
   timeframe TEXT NOT NULL DEFAULT 'D',
-  daily_candle_time BIGINT NOT NULL,
+  daily_candle_time BIGINT NOT NULL DEFAULT 0,
   decision TEXT NOT NULL DEFAULT 'monitor',
   reason TEXT NOT NULL DEFAULT 'n/a',
   custom_score DOUBLE PRECISION NOT NULL DEFAULT 0,
   tv_score DOUBLE PRECISION NOT NULL DEFAULT 0,
   mtf_status TEXT NOT NULL DEFAULT 'neutral',
   status TEXT NOT NULL DEFAULT 'pending',
-  created_at BIGINT NOT NULL,
-  CONSTRAINT signals_symbol_timeframe_candle_uq
-    UNIQUE (symbol, timeframe, daily_candle_time)
+  created_at BIGINT NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS signals_created_at_idx
-  ON signals (created_at DESC);
+-- 2) Add missing columns if the table already exists
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS timeframe TEXT DEFAULT 'D';
 
-CREATE TABLE IF NOT EXISTS mtf_state (
-  symbol TEXT NOT NULL,
-  timeframe TEXT NOT NULL,
-  state TEXT NOT NULL,
-  last_updated BIGINT NOT NULL,
-  PRIMARY KEY (symbol, timeframe)
-);
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS daily_candle_time BIGINT;
 
-CREATE TABLE IF NOT EXISTS mtf_events (
-  id BIGSERIAL PRIMARY KEY,
-  symbol TEXT NOT NULL,
-  timeframe TEXT NOT NULL,
-  previous_state TEXT NOT NULL DEFAULT 'none',
-  current_state TEXT NOT NULL,
-  event_time BIGINT NOT NULL
-);
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS decision TEXT DEFAULT 'monitor';
 
-CREATE INDEX IF NOT EXISTS mtf_events_symbol_timeframe_event_time_idx
-  ON mtf_events (symbol, timeframe, event_time DESC);
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS reason TEXT DEFAULT 'n/a';
+
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS custom_score DOUBLE PRECISION DEFAULT 0;
+
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS tv_score DOUBLE PRECISION DEFAULT 0;
+
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS mtf_status TEXT DEFAULT 'neutral';
+
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+
+ALTER TABLE signals
+  ADD COLUMN IF NOT EXISTS created_at BIGINT DEFAULT 0;
+
+-- 3) Backfill nulls so existing rows don't explode
+UPDATE signals
+SET daily_candle_time = 0
+WHERE daily_candle_time IS NULL;
+
+UPDATE signals
+SET created_at = 0
+WHERE created_at IS NULL;
+
+-- 4) Prevent duplicate daily signals for the same symbol/timeframe/candle
+CREATE UNIQUE INDEX IF NOT EXISTS signals_symbol_timeframe_daily_candle_uq
+  ON signals (symbol, timeframe, daily_candle_time);
+
+-- 5) Fix mtf_state PK to match ON CONFLICT (symbol, timeframe)
+ALTER TABLE mtf_state
+  DROP CONSTRAINT IF EXISTS mtf_state_pkey;
+
+ALTER TABLE mtf_state
+  ADD PRIMARY KEY (symbol, timeframe);
+
+-- 6) Unique open_trades by symbol
+DELETE FROM open_trades a
+USING open_trades b
+WHERE a.id < b.id
+  AND a.symbol = b.symbol;
+
+CREATE UNIQUE INDEX IF NOT EXISTS open_trades_symbol_uq
+  ON open_trades(symbol);
