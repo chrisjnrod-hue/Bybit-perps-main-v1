@@ -1,3 +1,7 @@
+-- =========================================
+-- Base tables
+-- =========================================
+
 CREATE TABLE IF NOT EXISTS symbols (
   symbol TEXT PRIMARY KEY,
   base TEXT NOT NULL,
@@ -33,23 +37,63 @@ CREATE TABLE IF NOT EXISTS open_trades (
   updated_at BIGINT NOT NULL
 );
 
+-- =========================================
+-- Signals table (Includes daily_candle_time natively)
+-- =========================================
 CREATE TABLE IF NOT EXISTS signals (
   id BIGSERIAL PRIMARY KEY,
   symbol TEXT NOT NULL,
   timeframe TEXT NOT NULL DEFAULT 'D',
-  daily_candle_time BIGINT NOT NULL DEFAULT 0,
   decision TEXT NOT NULL DEFAULT 'monitor',
   reason TEXT NOT NULL DEFAULT 'n/a',
   custom_score DOUBLE PRECISION NOT NULL DEFAULT 0,
   tv_score DOUBLE PRECISION NOT NULL DEFAULT 0,
   mtf_status TEXT NOT NULL DEFAULT 'neutral',
   status TEXT NOT NULL DEFAULT 'pending',
-  created_at BIGINT NOT NULL DEFAULT 0
+  created_at BIGINT NOT NULL DEFAULT 0,
+  daily_candle_time BIGINT DEFAULT 0
 );
+
+-- Ensure columns exist if table was already created previously
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS daily_candle_time BIGINT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS created_at BIGINT;
+
+UPDATE signals
+SET daily_candle_time = 0
+WHERE daily_candle_time IS NULL;
+
+UPDATE signals
+SET created_at = 0
+WHERE created_at IS NULL;
+
+-- Deduplicate rows that would conflict with the unique index.
+WITH ranked AS (
+  SELECT
+    id,
+    ROW_NUMBER() OVER (
+      PARTITION BY symbol, timeframe, daily_candle_time
+      ORDER BY created_at DESC, id DESC
+    ) AS row_num
+  FROM signals
+  WHERE daily_candle_time IS NOT NULL
+)
+DELETE FROM signals s
+USING ranked r
+WHERE s.id = r.id
+  AND r.row_num > 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS signals_symbol_timeframe_daily_candle_uq
   ON signals (symbol, timeframe, daily_candle_time);
 
+CREATE INDEX IF NOT EXISTS signals_symbol_timeframe_idx
+  ON signals (symbol, timeframe);
+
+CREATE INDEX IF NOT EXISTS signals_created_at_idx
+  ON signals (created_at DESC);
+
+-- =========================================
+-- MTF tables
+-- =========================================
 CREATE TABLE IF NOT EXISTS mtf_state (
   symbol TEXT NOT NULL,
   timeframe TEXT NOT NULL,
@@ -67,6 +111,12 @@ CREATE TABLE IF NOT EXISTS mtf_events (
   event_time BIGINT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS mtf_events_symbol_timeframe_idx
+  ON mtf_events (symbol, timeframe, event_time DESC);
+
+-- =========================================
+-- Scan run tracking
+-- =========================================
 CREATE TABLE IF NOT EXISTS scan_runs (
   id BIGSERIAL PRIMARY KEY,
   run_key TEXT NOT NULL UNIQUE,
@@ -76,15 +126,6 @@ CREATE TABLE IF NOT EXISTS scan_runs (
   reason TEXT NOT NULL DEFAULT 'n/a',
   created_at BIGINT NOT NULL DEFAULT 0
 );
-
-CREATE INDEX IF NOT EXISTS signals_symbol_timeframe_idx
-  ON signals (symbol, timeframe);
-
-CREATE INDEX IF NOT EXISTS signals_created_at_idx
-  ON signals (created_at DESC);
-
-CREATE INDEX IF NOT EXISTS mtf_events_symbol_timeframe_idx
-  ON mtf_events (symbol, timeframe, event_time DESC);
 
 CREATE INDEX IF NOT EXISTS scan_runs_symbol_timeframe_idx
   ON scan_runs (symbol, timeframe, daily_candle_time);
