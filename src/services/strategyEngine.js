@@ -8,7 +8,8 @@ const {
   listOpenTrades,
   saveKline,
   query,
-  countOpenTrades
+  countOpenTrades,
+  hasRecentSignal
 } = require('../db');
 const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
 const {
@@ -26,12 +27,15 @@ const {
 const { buildMarketData } = require('./marketData');
 const { setupKeepAlive } = require('./keepalive');
 
+const pLimit = require('p-limit');
+
 let wsBootstrapped = false;
 let lastDailyCleanupAt = 0;
 let boundaryScanRunning = false;
 
 const DEFAULT_TIMEFRAMES = ['5', '15', '60', '240', 'D'];
 const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
+const DEFAULT_BOUNDARY_SCAN_MS = 15 * 60 * 1000;
 
 const sentAlignmentAlerts = new Set();
 const sentRecommendations = new Set();
@@ -40,6 +44,11 @@ const MARKET_DATA_CACHE_TTL_MS = 15 * 1000;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getBoundaryScanIntervalMs() {
+  const raw = Number(config.BOUNDARY_SCAN_INTERVAL_MS ?? DEFAULT_BOUNDARY_SCAN_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_BOUNDARY_SCAN_MS;
 }
 
 function getStartupTimeframes() {
@@ -86,6 +95,17 @@ function buildSignalDedupeKey(signal, type) {
     signal.mtfStatus || 'neutral',
     signal.reason || 'n/a'
   ].join(':');
+}
+
+function buildScanSummaryKey(signals = []) {
+  return (signals || [])
+    .map((s) => [
+      String(s?.symbol || '').toUpperCase(),
+      Number(s?.dailyCandleTime || 0),
+      String(s?.reason || 'n/a')
+    ].join(':'))
+    .sort()
+    .join('|');
 }
 
 async function sendTelegramBlock(text, dedupeKey) {
@@ -228,7 +248,6 @@ async function syncOpenTradesFromMarket() {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  // MTF alert only for accepted + aligned signals.
   if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
     return false;
   }
@@ -350,6 +369,40 @@ async function handleWebSocketKline(msg) {
   }
 }
 
+async function scanSymbolCandidate(symbol) {
+  try {
+    const dailyCandles = await fetchKlines(symbol, 'D', 200);
+    if (!dailyCandles || dailyCandles.length < 26) return null;
+
+    const rootCandidate = detectDailyRootSignal(dailyCandles, { symbol, lastPrice: 0 });
+    if (!rootCandidate) return null;
+
+    const byTf = {
+      D: dailyCandles,
+      '5': await fetchKlines(symbol, '5', 200),
+      '15': await fetchKlines(symbol, '15', 200),
+      '60': await fetchKlines(symbol, '60', 200),
+      '240': await fetchKlines(symbol, '240', 200)
+    };
+
+    const marketData = await getMarketDataCached(symbol);
+    const signal = await evaluateSignal(symbol, byTf, marketData);
+
+    if (!signal) return null;
+
+    return {
+      symbol,
+      dailyCandleTime: signal.dailyCandleTime,
+      reason: signal.reason,
+      mtfStatus: signal.mtfStatus,
+      signal
+    };
+  } catch (err) {
+    console.error(`Initial scan failed for symbol ${symbol}:`, err);
+    return null;
+  }
+}
+
 async function bootstrapStrategy() {
   console.log('Bootstrapping strategy');
   setupKeepAlive();
@@ -379,99 +432,76 @@ async function bootstrapStrategy() {
   const startupSymbols =
     startupScanLimit > 0 ? symbols.slice(0, startupScanLimit) : symbols;
 
+  const limited = pLimit(Number(config.STARTUP_SCAN_CONCURRENCY || 4));
+
+  const startupResults = await Promise.all(
+    startupSymbols.map((symbol) => limited(() => scanSymbolCandidate(symbol)))
+  );
+
   const startupSignals = [];
   const startupAlerts = [];
   const startupRecommendations = [];
 
-  for (const symbol of startupSymbols) {
-    try {
-      // Root detection is a side-effect-free check. Use it to decide whether to
-      // fetch MTF candles and market data. This avoids duplicate writes.
-      const dailyCandles = await fetchKlines(symbol, 'D', 200);
+  for (const item of startupResults) {
+    if (!item || !item.signal) continue;
 
-      if (!dailyCandles || dailyCandles.length < 26) continue;
+    const { signal } = item;
 
-      const rootCandidate = detectDailyRootSignal(dailyCandles, {
-        symbol,
-        lastPrice: 0
-      });
+    startupSignals.push({
+      symbol: signal.symbol,
+      dailyCandleTime: signal.dailyCandleTime,
+      reason: signal.reason
+    });
 
-      if (!rootCandidate) continue;
+    if (signal.decision === 'accept' && signal.mtfAligned) {
+      startupAlerts.push({ signal, marketData: await getMarketDataCached(signal.symbol) });
+    }
 
-      startupSignals.push({
-        symbol,
-        dailyCandleTime: rootCandidate.dailyCandleTime,
-        reason: rootCandidate.reason
-      });
+    if (signal.decision === 'accept') {
+      const openCount = await countOpenTrades();
 
-      const byTf = {
-        D: dailyCandles,
-        '5': await fetchKlines(symbol, '5', 200),
-        '15': await fetchKlines(symbol, '15', 200),
-        '60': await fetchKlines(symbol, '60', 200),
-        '240': await fetchKlines(symbol, '240', 200)
-      };
+      if (openCount < Number(config.MAX_OPEN_TRADES || 3)) {
+        const marketData = await getMarketDataCached(signal.symbol);
+        const conditions = {
+          volume24hUsd: Number(marketData.volume24hUsd || 0),
+          spreadPct: Number(marketData.spreadPct || 0),
+          topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
+        };
 
-      const marketData = await getMarketDataCached(symbol);
-      const signal = await evaluateSignal(symbol, byTf, marketData);
+        const tradeCheck = shouldOpenTrade(signal, conditions);
 
-      if (!signal) continue;
+        if (tradeCheck.open) {
+          const plan = buildTradePlan(signal, conditions);
+          const savedTrade = await ensureTradeFromSignal(signal, plan);
 
-      if (signal.decision === 'accept' && signal.mtfAligned) {
-        startupAlerts.push({ signal, marketData });
-      }
-
-      if (signal.decision === 'accept') {
-        const openCount = await countOpenTrades();
-
-        if (openCount < Number(config.MAX_OPEN_TRADES || 3)) {
-          const conditions = {
-            volume24hUsd: Number(marketData.volume24hUsd || 0),
-            spreadPct: Number(marketData.spreadPct || 0),
-            topOfBookDepthUsd: Number(marketData.topOfBookDepthUsd || 0)
-          };
-
-          const tradeCheck = shouldOpenTrade(signal, conditions);
-
-          if (tradeCheck.open) {
-            const plan = buildTradePlan(signal, conditions);
-            const savedTrade = await ensureTradeFromSignal(signal, plan);
-
-            if (savedTrade) {
-              startupRecommendations.push({
-                signal,
-                text: formatRecommendationTelegram({
-                  symbol: signal.symbol,
-                  action: 'open',
-                  customScore: signal.customScore,
-                  tvScore: signal.tvScore,
-                  mtfStatus: signal.mtfStatus,
-                  mtfValues: signal.mtfValues,
-                  liquidity: signal.liquidity?.valid ? 'valid' : 'invalid',
-                  reason: signal.reason,
-                  plan
-                })
-              });
-            }
+          if (savedTrade) {
+            startupRecommendations.push({
+              signal,
+              text: formatRecommendationTelegram({
+                symbol: signal.symbol,
+                action: 'open',
+                customScore: signal.customScore,
+                tvScore: signal.tvScore,
+                mtfStatus: signal.mtfStatus,
+                mtfValues: signal.mtfValues,
+                liquidity: signal.liquidity?.valid ? 'valid' : 'invalid',
+                reason: signal.reason,
+                plan
+              })
+            });
           }
         }
       }
-    } catch (err) {
-      console.error(`Initial scan failed for symbol ${symbol}:`, err);
     }
   }
 
-  // Startup summary: every daily root signal candidate.
-  const summaryChunks = formatSummaryTelegramChunks(startupSignals);
+  const startupSummaryChunks = formatSummaryTelegramChunks(startupSignals);
 
-  for (let i = 0; i < summaryChunks.length; i++) {
-    await sendTelegramBlock(
-      summaryChunks[i],
-      `summary:startup:${i + 1}`
-    );
+  for (let i = 0; i < startupSummaryChunks.length; i++) {
+    const dedupeKey = `summary:startup:${buildScanSummaryKey(startupSignals)}:${i}`;
+    await sendTelegramBlock(startupSummaryChunks[i], dedupeKey);
   }
 
-  // Only send alignment alert blocks for accepted + aligned signals.
   for (const item of startupAlerts) {
     await maybeSendAlignmentAlert(item.signal, item.marketData);
     if (config.TELEGRAM_SEND_DELAY_MS > 0) {
@@ -489,77 +519,104 @@ async function bootstrapStrategy() {
     }
   }
 
-  if (config.ENABLE_BOUNDARY_SCAN) {
-    setInterval(async () => {
-      if (boundaryScanRunning) return;
+  async function boundaryScanTick() {
+    if (boundaryScanRunning) return;
+    boundaryScanRunning = true;
 
-      boundaryScanRunning = true;
+    try {
+      const activeSymbols = await seedSymbols();
 
-      try {
-        const activeSymbols = await seedSymbols();
-        const newRootSignals = [];
-        const seenRootKeys = new Set();
+      const newRootSignals = [];
+      const seenRootKeys = new Set();
 
-        for (const symbol of activeSymbols) {
-          const dailyCandles = await fetchKlines(symbol, 'D', 200);
+      const limitedBoundary = pLimit(Number(config.BOUNDARY_SCAN_CONCURRENCY || 4));
 
-          if (!dailyCandles || dailyCandles.length < 26) {
-            continue;
-          }
+      const boundaryResults = await Promise.all(
+        activeSymbols.map((symbol) =>
+          limitedBoundary(async () => {
+            const dailyCandles = await fetchKlines(symbol, 'D', 200);
+            if (!dailyCandles || dailyCandles.length < 26) return null;
 
-          const root = detectDailyRootSignal(dailyCandles, { symbol });
-          if (!root) continue;
+            const root = detectDailyRootSignal(dailyCandles, { symbol });
+            if (!root) return null;
 
-          const key = `${symbol}:${root.dailyCandleTime}`;
-          if (seenRootKeys.has(key)) continue;
-          seenRootKeys.add(key);
+            const key = `${symbol}:${root.dailyCandleTime}`;
+            if (seenRootKeys.has(key)) return null;
+            seenRootKeys.add(key);
 
-          newRootSignals.push({
-            symbol,
-            dailyCandleTime: root.dailyCandleTime,
-            reason: root.reason
-          });
+            const exists = await hasRecentSignal(symbol, root.dailyCandleTime, root.reason, 30);
+            if (exists) return null;
 
-          const byTf = {
-            D: dailyCandles,
-            '5': await fetchKlines(symbol, '5', 200),
-            '15': await fetchKlines(symbol, '15', 200),
-            '60': await fetchKlines(symbol, '60', 200),
-            '240': await fetchKlines(symbol, '240', 200)
-          };
+            const byTf = {
+              D: dailyCandles,
+              '5': await fetchKlines(symbol, '5', 200),
+              '15': await fetchKlines(symbol, '15', 200),
+              '60': await fetchKlines(symbol, '60', 200),
+              '240': await fetchKlines(symbol, '240', 200)
+            };
 
-          const marketData = await getMarketDataCached(symbol);
-          const signal = await evaluateSignal(symbol, byTf, marketData);
+            const marketData = await getMarketDataCached(symbol);
+            const signal = await evaluateSignal(symbol, byTf, marketData);
 
-          if (!signal) continue;
+            if (!signal) return null;
 
-          if (signal.decision === 'accept' && signal.mtfAligned) {
-            await maybeSendAlignmentAlert(signal, marketData);
-          }
+            return {
+              signal,
+              marketData,
+              root
+            };
+          })
+        )
+      );
 
-          if (signal.decision === 'accept') {
-            await maybeSendRecommendation(signal, marketData);
-          }
+      for (const item of boundaryResults) {
+        if (!item || !item.signal) continue;
 
-          await delay(50);
+        const { signal, marketData } = item;
+
+        newRootSignals.push({
+          symbol: signal.symbol,
+          dailyCandleTime: signal.dailyCandleTime,
+          reason: signal.reason
+        });
+
+        if (signal.decision === 'accept' && signal.mtfAligned) {
+          await maybeSendAlignmentAlert(signal, marketData);
         }
 
-        if (newRootSignals.length) {
-          const chunks = formatSummaryTelegramChunks(newRootSignals);
-
-          for (let i = 0; i < chunks.length; i++) {
-            await sendTelegramBlock(
-              chunks[i],
-              `summary:boundary:${i + 1}`
-            );
-          }
+        if (signal.decision === 'accept') {
+          await maybeSendRecommendation(signal, marketData);
         }
-      } catch (err) {
-        console.error('Boundary scan failed:', err);
-      } finally {
-        boundaryScanRunning = false;
       }
-    }, config.BOUNDARY_SCAN_INTERVAL_MS || 15000);
+
+      if (newRootSignals.length) {
+        const summaryKey = `summary:boundary:${buildScanSummaryKey(newRootSignals)}`;
+        const chunks = formatSummaryTelegramChunks(newRootSignals);
+
+        for (let i = 0; i < chunks.length; i++) {
+          await sendTelegramBlock(chunks[i], `${summaryKey}:${i}`);
+        }
+      }
+    } catch (err) {
+      console.error('Boundary scan failed:', err);
+    } finally {
+      boundaryScanRunning = false;
+    }
+  }
+
+  if (config.ENABLE_BOUNDARY_SCAN) {
+    const boundaryScanMs = getBoundaryScanIntervalMs();
+
+    // run immediately once, then on exact interval
+    boundaryScanTick().catch((err) => {
+      console.error('Immediate boundary scan failed:', err);
+    });
+
+    setInterval(() => {
+      boundaryScanTick().catch((err) => {
+        console.error('Scheduled boundary scan failed:', err);
+      });
+    }, boundaryScanMs);
   }
 }
 
