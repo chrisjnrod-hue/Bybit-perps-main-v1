@@ -173,30 +173,53 @@ async function updateOpenTradeStatus(symbol, status, reason = null) {
   await pool.query(sql, reason ? [symbol, status, Date.now(), reason] : values);
 }
 
+async function hasRecentSignal(symbol, dailyCandleTime, reason, windowMinutes = 30) {
+  const result = await pool.query(
+    `
+    SELECT 1
+    FROM signals
+    WHERE symbol = $1
+      AND timeframe = 'D'
+      AND daily_candle_time = $2
+      AND reason = $3
+      AND created_at > NOW() - ($4 || ' minutes')::interval
+    LIMIT 1
+    `,
+    [symbol, Number(dailyCandleTime || 0), String(reason || 'n/a'), windowMinutes]
+  );
+
+  return result.rowCount > 0;
+}
+
 async function recordSignal(signal) {
   await pool.query(
     `
     INSERT INTO signals (
       symbol,
       timeframe,
+      daily_candle_time,
       decision,
       reason,
       custom_score,
       tv_score,
       mtf_status,
-      status
+      status,
+      created_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    ON CONFLICT (symbol, timeframe, daily_candle_time, reason) DO NOTHING
     `,
     [
       signal.symbol,
       signal.timeframe || 'D',
+      Number(signal.dailyCandleTime || 0),
       signal.decision || 'monitor',
       signal.reason || 'n/a',
       Number(signal.customScore || 0),
       Number(signal.tvScore || 0),
       signal.mtfStatus || 'neutral',
-      signal.status || 'pending'
+      signal.status || 'pending',
+      Date.now()
     ]
   );
 }
@@ -252,6 +275,7 @@ module.exports = {
   getOpenTradeBySymbol,
   saveOpenTrade,
   updateOpenTradeStatus,
+  hasRecentSignal,
   recordSignal,
   getMtfState,
   saveMtfState,
