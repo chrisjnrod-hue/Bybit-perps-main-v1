@@ -27,14 +27,11 @@ const {
 const { buildMarketData } = require('./marketData');
 const { setupKeepAlive } = require('./keepalive');
 
-const pLimit = require('p-limit');
-
 let wsBootstrapped = false;
 let lastDailyCleanupAt = 0;
 let boundaryScanRunning = false;
 
 const DEFAULT_TIMEFRAMES = ['5', '15', '60', '240', 'D'];
-const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
 const DEFAULT_BOUNDARY_SCAN_MS = 15 * 60 * 1000;
 
 const sentAlignmentAlerts = new Set();
@@ -49,37 +46,6 @@ function delay(ms) {
 function getBoundaryScanIntervalMs() {
   const raw = Number(config.BOUNDARY_SCAN_INTERVAL_MS ?? DEFAULT_BOUNDARY_SCAN_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_BOUNDARY_SCAN_MS;
-}
-
-function getStartupTimeframes() {
-  const configured = process.env.STARTUP_SCAN_TIMEFRAMES;
-
-  if (typeof configured !== 'string' || configured.trim() === '') {
-    return DEFAULT_TIMEFRAMES;
-  }
-
-  const requested = configured
-    .split(',')
-    .map((tf) => tf.trim())
-    .filter(Boolean);
-
-  return [...new Set([...requested, ...DEFAULT_TIMEFRAMES])];
-}
-
-function getStartupScanLimit() {
-  const raw = process.env.STARTUP_SCAN_MAX_SYMBOLS;
-  if (typeof raw === 'undefined' || raw === '') return 0;
-
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
-}
-
-function getStartupScanDelayMs() {
-  const value = Number(
-    config.STARTUP_SCAN_DELAY_MS ?? process.env.STARTUP_SCAN_DELAY_MS ?? 1000
-  );
-
-  return Number.isFinite(value) && value >= 0 ? value : 1000;
 }
 
 function dailySignalKey(signal) {
@@ -164,18 +130,6 @@ async function seedSymbols() {
   return filtered;
 }
 
-async function fetchCandlesForSymbol(symbol, timeframes = DEFAULT_TIMEFRAMES) {
-  const byTf = {};
-
-  for (const tf of timeframes) {
-    const candles = await fetchKlines(symbol, tf, 200);
-    await saveKlines(symbol, tf, candles);
-    byTf[tf] = candles;
-  }
-
-  return byTf;
-}
-
 async function getStoredCandles(symbol) {
   const byTf = {};
 
@@ -248,6 +202,8 @@ async function syncOpenTradesFromMarket() {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
+  // Only send when it is both accepted and aligned.
+  // Do not repeat for the same signal key.
   if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
     return false;
   }
@@ -327,6 +283,14 @@ async function evaluateAndDispatchSymbol(symbol, options = {}) {
 
   const candlesByTf = await getStoredCandles(symbol);
   const marketData = await getMarketDataCached(symbol);
+
+  // Step 1: run 1D criteria check first.
+  const dailyCandles = candlesByTf.D || [];
+  const rootCandidate = detectDailyRootSignal(dailyCandles, { symbol, ...marketData });
+
+  if (!rootCandidate) return null;
+
+  // Step 2: only if root criteria passes do we fetch MTF and run full evaluation.
   const signal = await evaluateSignal(symbol, candlesByTf, marketData);
 
   if (!signal) return null;
@@ -369,13 +333,24 @@ async function handleWebSocketKline(msg) {
   }
 }
 
-async function scanSymbolCandidate(symbol) {
+async function scanSymbolCandidate(symbol, options = {}) {
+  const { onlyRoot = false } = options;
+
   try {
     const dailyCandles = await fetchKlines(symbol, 'D', 200);
-    if (!dailyCandles || dailyCandles.length < 26) return null;
+    if (!dailyCandles || dailyCandles.length < 8) return null;
 
-    const rootCandidate = detectDailyRootSignal(dailyCandles, { symbol, lastPrice: 0 });
+    const rootCandidate = detectDailyRootSignal(dailyCandles, { symbol });
     if (!rootCandidate) return null;
+
+    if (onlyRoot) {
+      return {
+        symbol,
+        dailyCandleTime: rootCandidate.dailyCandleTime,
+        reason: rootCandidate.reason,
+        rootOnly: true
+      };
+    }
 
     const byTf = {
       D: dailyCandles,
@@ -398,7 +373,7 @@ async function scanSymbolCandidate(symbol) {
       signal
     };
   } catch (err) {
-    console.error(`Initial scan failed for symbol ${symbol}:`, err);
+    console.error(`Scan failed for symbol ${symbol}:`, err);
     return null;
   }
 }
@@ -428,24 +403,25 @@ async function bootstrapStrategy() {
     }
   }
 
-  const startupScanLimit = getStartupScanLimit();
-  const startupSymbols =
-    startupScanLimit > 0 ? symbols.slice(0, startupScanLimit) : symbols;
-
-  const limited = pLimit(Number(config.STARTUP_SCAN_CONCURRENCY || 4));
-
-  const startupResults = await Promise.all(
-    startupSymbols.map((symbol) => limited(() => scanSymbolCandidate(symbol)))
-  );
-
   const startupSignals = [];
   const startupAlerts = [];
   const startupRecommendations = [];
 
-  for (const item of startupResults) {
-    if (!item || !item.signal) continue;
+  const symbolCandidates = [];
 
-    const { signal } = item;
+  for (const symbol of symbols) {
+    const rootCandidate = await scanSymbolCandidate(symbol, { onlyRoot: true });
+    if (rootCandidate) {
+      symbolCandidates.push(rootCandidate);
+    }
+  }
+
+  for (const item of symbolCandidates) {
+    const signalResult = await scanSymbolCandidate(item.symbol);
+
+    if (!signalResult || !signalResult.signal) continue;
+
+    const { signal } = signalResult;
 
     startupSignals.push({
       symbol: signal.symbol,
@@ -454,12 +430,12 @@ async function bootstrapStrategy() {
     });
 
     if (signal.decision === 'accept' && signal.mtfAligned) {
-      startupAlerts.push({ signal, marketData: await getMarketDataCached(signal.symbol) });
+      const marketData = await getMarketDataCached(signal.symbol);
+      startupAlerts.push({ signal, marketData });
     }
 
     if (signal.decision === 'accept') {
       const openCount = await countOpenTrades();
-
       if (openCount < Number(config.MAX_OPEN_TRADES || 3)) {
         const marketData = await getMarketDataCached(signal.symbol);
         const conditions = {
@@ -495,11 +471,14 @@ async function bootstrapStrategy() {
     }
   }
 
-  const startupSummaryChunks = formatSummaryTelegramChunks(startupSignals);
+  // Initial summary: all qualifying 1D signals from startup.
+  if (startupSignals.length) {
+    const summaryChunks = formatSummaryTelegramChunks(startupSignals);
 
-  for (let i = 0; i < startupSummaryChunks.length; i++) {
-    const dedupeKey = `summary:startup:${buildScanSummaryKey(startupSignals)}:${i}`;
-    await sendTelegramBlock(startupSummaryChunks[i], dedupeKey);
+    for (let i = 0; i < summaryChunks.length; i++) {
+      const dedupeKey = `summary:start:${buildScanSummaryKey(startupSignals)}:${i}`;
+      await sendTelegramBlock(summaryChunks[i], dedupeKey);
+    }
   }
 
   for (const item of startupAlerts) {
@@ -525,73 +504,48 @@ async function bootstrapStrategy() {
 
     try {
       const activeSymbols = await seedSymbols();
+      const boundarySignals = [];
 
-      const newRootSignals = [];
-      const seenRootKeys = new Set();
+      for (const symbol of activeSymbols) {
+        const rootCandidate = await scanSymbolCandidate(symbol, { onlyRoot: true });
+        if (!rootCandidate) continue;
 
-      const limitedBoundary = pLimit(Number(config.BOUNDARY_SCAN_CONCURRENCY || 4));
+        const hasRecent = await hasRecentSignal(
+          symbol,
+          rootCandidate.dailyCandleTime,
+          rootCandidate.reason,
+          30
+        );
 
-      const boundaryResults = await Promise.all(
-        activeSymbols.map((symbol) =>
-          limitedBoundary(async () => {
-            const dailyCandles = await fetchKlines(symbol, 'D', 200);
-            if (!dailyCandles || dailyCandles.length < 26) return null;
+        if (hasRecent) continue;
 
-            const root = detectDailyRootSignal(dailyCandles, { symbol });
-            if (!root) return null;
+        const signalResult = await scanSymbolCandidate(symbol);
+        if (!signalResult || !signalResult.signal) continue;
 
-            const key = `${symbol}:${root.dailyCandleTime}`;
-            if (seenRootKeys.has(key)) return null;
-            seenRootKeys.add(key);
+        const { signal } = signalResult;
 
-            const exists = await hasRecentSignal(symbol, root.dailyCandleTime, root.reason, 30);
-            if (exists) return null;
-
-            const byTf = {
-              D: dailyCandles,
-              '5': await fetchKlines(symbol, '5', 200),
-              '15': await fetchKlines(symbol, '15', 200),
-              '60': await fetchKlines(symbol, '60', 200),
-              '240': await fetchKlines(symbol, '240', 200)
-            };
-
-            const marketData = await getMarketDataCached(symbol);
-            const signal = await evaluateSignal(symbol, byTf, marketData);
-
-            if (!signal) return null;
-
-            return {
-              signal,
-              marketData,
-              root
-            };
-          })
-        )
-      );
-
-      for (const item of boundaryResults) {
-        if (!item || !item.signal) continue;
-
-        const { signal, marketData } = item;
-
-        newRootSignals.push({
+        boundarySignals.push({
           symbol: signal.symbol,
           dailyCandleTime: signal.dailyCandleTime,
           reason: signal.reason
         });
 
         if (signal.decision === 'accept' && signal.mtfAligned) {
+          const marketData = await getMarketDataCached(signal.symbol);
           await maybeSendAlignmentAlert(signal, marketData);
         }
 
         if (signal.decision === 'accept') {
+          const marketData = await getMarketDataCached(signal.symbol);
           await maybeSendRecommendation(signal, marketData);
         }
       }
 
-      if (newRootSignals.length) {
-        const summaryKey = `summary:boundary:${buildScanSummaryKey(newRootSignals)}`;
-        const chunks = formatSummaryTelegramChunks(newRootSignals);
+      // Boundary summary: exactly one summary block per boundary scan
+      // for all new 1D signals found in that interval.
+      if (boundarySignals.length) {
+        const chunks = formatSummaryTelegramChunks(boundarySignals);
+        const summaryKey = `summary:boundary:${buildScanSummaryKey(boundarySignals)}`;
 
         for (let i = 0; i < chunks.length; i++) {
           await sendTelegramBlock(chunks[i], `${summaryKey}:${i}`);
@@ -607,7 +561,7 @@ async function bootstrapStrategy() {
   if (config.ENABLE_BOUNDARY_SCAN) {
     const boundaryScanMs = getBoundaryScanIntervalMs();
 
-    // run immediately once, then on exact interval
+    // Run once immediately, then each 15 minutes.
     boundaryScanTick().catch((err) => {
       console.error('Immediate boundary scan failed:', err);
     });
