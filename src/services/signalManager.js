@@ -15,53 +15,61 @@ function getCurrentPrice(ticker, latestDailyCandle) {
 }
 
 function detectDailyRootSignal(daily = [], ticker = {}) {
-  if (!Array.isArray(daily) || daily.length < 26) return null;
+  if (!Array.isArray(daily) || daily.length < 8) return null;
 
   const latest = daily[daily.length - 1];
   const currentOpen = Number(latest?.open || 0);
   const currentPrice = getCurrentPrice(ticker, latest);
 
-  const priorCloses = daily
-    .slice(0, -1)
+  const recentCloses = daily
+    .slice(-8, -1)
     .map((candle) => Number(candle.close || 0));
 
-  if (priorCloses.length < 7) return null;
+  if (recentCloses.length < 7) return null;
 
-  const ma7 = sma(priorCloses, 7);
-  const openAboveMa7 = currentOpen > ma7;
-  const priceAboveMa7 = currentPrice > ma7;
-  const aboveMa7 = openAboveMa7 || priceAboveMa7;
+  const ma7 = sma(recentCloses, 7);
+  const openAndPriceAboveMa7 = currentOpen > ma7 && currentPrice > ma7;
+
+  // Must reflect: current daily open-candle histogram positive
+  // after previous closed candle histogram was negative.
+  // If detectBullishHistogramFlip() is implemented against the current open
+  // candle vs last closed candle, it is valid.
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  if (!aboveMa7 && !positiveFlip) return null;
+  if (!openAndPriceAboveMa7 && !positiveFlip) {
+    return null;
+  }
 
   return {
     symbol: ticker.symbol || null,
     dailyCandleTime: Number(latest?.open_time || 0) || null,
-    openAboveMa7,
-    priceAboveMa7,
+    currentOpen,
+    currentPrice,
+    ma7,
+    openAndPriceAboveMa7,
     positiveFlip,
-    price: currentPrice,
-    reason: aboveMa7
-      ? '1D open/current price above 7MA'
-      : '1D below 7MA with current positive histogram flip'
+    reason: openAndPriceAboveMa7
+      ? '1D open and current price above 7MA'
+      : '1D open-candle histogram flipped positive after prior closed candle was negative'
   };
 }
 
 async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
-  if (daily.length < 26) return null;
+  if (daily.length < 8) return null;
 
   const latestDailyCandle = daily[daily.length - 1];
   const currentPrice = getCurrentPrice(ticker, latestDailyCandle);
   const currentOpen = Number(latestDailyCandle?.open || 0);
 
-  const dailyCloses = daily.map((candle) => Number(candle.close || 0));
-  const ma7 = sma(dailyCloses, 7);
+  const recentCloses = daily
+    .slice(-8, -1)
+    .map((candle) => Number(candle.close || 0));
 
-  const openAboveMa7 = currentOpen > ma7;
-  const priceAboveMa7 = currentPrice > ma7;
-  const aboveMa7 = openAboveMa7 || priceAboveMa7;
+  if (recentCloses.length < 7) return null;
+
+  const ma7 = sma(recentCloses, 7);
+  const openAndPriceAboveMa7 = currentOpen > ma7 && currentPrice > ma7;
 
   const currentDailyHistogram = macdHistogram(daily);
   const dailyHistogramDirection =
@@ -71,12 +79,15 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
         ? 'negative'
         : 'neutral';
 
+  // This must be based on the current open candle vs previous closed candle.
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  const rootSignal = aboveMa7 || (!aboveMa7 && positiveFlip);
+  const rootSignal =
+    openAndPriceAboveMa7 || positiveFlip;
 
   if (!rootSignal) return null;
 
+  // MTF analysis ONLY AFTER 1D root signal passes.
   const mtf = evaluateMtfAlignment({
     '5': candlesByTf['5'] || [],
     '15': candlesByTf['15'] || [],
@@ -96,7 +107,7 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 
   const score = calculateCustomRating({
     macdFlip: positiveFlip,
-    openAboveMa7: aboveMa7,
+    openAboveMa7: openAndPriceAboveMa7,
     mtfStatus: mtf.status,
     liquidityValid: liquidity.valid,
     marketTrend: mtf.aligned ? 'strong' : 'mixed',
@@ -112,12 +123,12 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
       : 'monitor';
 
   let reason = '1D root signal';
-  if (aboveMa7 && positiveFlip) {
-    reason = '1D above 7MA and positive hist flip';
-  } else if (aboveMa7) {
-    reason = '1D above 7MA';
+  if (openAndPriceAboveMa7 && positiveFlip) {
+    reason = '1D open and current price above 7MA with positive hist flip';
+  } else if (openAndPriceAboveMa7) {
+    reason = '1D open and current price above 7MA';
   } else if (positiveFlip) {
-    reason = '1D below 7MA with positive hist flip';
+    reason = '1D open-candle histogram flipped positive after prior closed candle was negative';
   }
 
   const signal = {
@@ -129,8 +140,8 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     dailyHistogram: currentDailyHistogram,
     dailyHistogramDirection,
     macdFlip: positiveFlip,
-    openAboveMa7,
-    priceAboveMa7,
+    openAboveMa7: openAndPriceAboveMa7,
+    priceAboveMa7: currentPrice > ma7,
     customScore: score.score,
     customScoreLabel: score.label,
     tvScore: tv.score,
