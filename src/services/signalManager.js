@@ -73,8 +73,7 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  const rootSignal =
-    aboveMa7 || (!aboveMa7 && positiveFlip);
+  const rootSignal = aboveMa7 || (!aboveMa7 && positiveFlip);
 
   if (!rootSignal) return null;
 
@@ -107,9 +106,6 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const tv = await getTradingViewRating(symbol);
   const previousState = await getMtfState(symbol, 'D');
 
-  // A signal is only sent as an MTF alignment alert when it is both:
-  // 1) a valid root signal
-  // 2) all four MTF histograms are positive
   const decision =
     mtf.aligned && liquidity.valid
       ? 'accept'
