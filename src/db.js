@@ -182,10 +182,15 @@ async function hasRecentSignal(symbol, dailyCandleTime, reason, windowMinutes = 
       AND timeframe = 'D'
       AND daily_candle_time = $2
       AND reason = $3
-      AND created_at > NOW() - ($4 || ' minutes')::interval
+      AND created_at > $4
     LIMIT 1
     `,
-    [symbol, Number(dailyCandleTime || 0), String(reason || 'n/a'), windowMinutes]
+    [
+      symbol,
+      Number(dailyCandleTime || 0),
+      String(reason || 'n/a'),
+      Date.now() - (windowMinutes * 60 * 1000)
+    ]
   );
 
   return result.rowCount > 0;
@@ -207,7 +212,7 @@ async function recordSignal(signal) {
       created_at
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    ON CONFLICT (symbol, timeframe, daily_candle_time, reason) DO NOTHING
+    ON CONFLICT (symbol, timeframe, daily_candle_time) DO NOTHING
     `,
     [
       signal.symbol,
