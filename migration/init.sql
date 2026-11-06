@@ -47,6 +47,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS open_trades_symbol_uq ON open_trades(symbol);
 -- =========================================
 -- Signals table
 -- =========================================
+
+-- Dynamic cleanup block to migrate existing TIMESTAMP types back to BIGINT
+DO $$
+BEGIN
+    -- Fix signals table if it's a timestamp
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'signals' AND column_name = 'created_at' AND data_type LIKE '%timestamp%'
+    ) THEN
+        -- Remove default temporarily to prevent conflicts
+        ALTER TABLE signals ALTER COLUMN created_at DROP DEFAULT;
+        -- Convert timestamp data to a Unix millisecond epoch timestamp integer
+        ALTER TABLE signals ALTER COLUMN created_at TYPE BIGINT USING (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS signals (
   id BIGSERIAL PRIMARY KEY,
   symbol TEXT NOT NULL,
@@ -57,29 +73,18 @@ CREATE TABLE IF NOT EXISTS signals (
   tv_score DOUBLE PRECISION NOT NULL DEFAULT 0,
   mtf_status TEXT NOT NULL DEFAULT 'neutral',
   status TEXT NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at BIGINT NOT NULL DEFAULT 0,
   daily_candle_time BIGINT DEFAULT 0
 );
+
+-- Ensure structural default rules match what the app sends
+ALTER TABLE signals ALTER COLUMN created_at SET DEFAULT 0;
 
 -- Ensure column exists if table already existed without it
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS daily_candle_time BIGINT DEFAULT 0;
 
-UPDATE signals
-SET daily_candle_time = 0
-WHERE daily_candle_time IS NULL;
-
--- Dynamic fix block for signals.created_at to handle existing data safely
-DO $$
-BEGIN
-    -- If the database's existing column is a timestamp, treat updates as timestamp expressions
-    IF (SELECT data_type FROM information_schema.columns WHERE table_name = 'signals' AND column_name = 'created_at') LIKE '%timestamp%' THEN
-        ALTER TABLE signals ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;
-        UPDATE signals SET created_at = '1970-01-01 00:00:00' WHERE created_at IS NULL;
-    ELSE
-        -- If it's still a bigint, fallback to 0 safely
-        UPDATE signals SET created_at = 0 WHERE created_at IS NULL;
-    END IF;
-END $$;
+UPDATE signals SET daily_candle_time = 0 WHERE daily_candle_time IS NULL;
+UPDATE signals SET created_at = 0 WHERE created_at IS NULL;
 
 -- Deduplicate rows that would conflict with the unique index.
 WITH ranked AS (
@@ -136,6 +141,19 @@ CREATE INDEX IF NOT EXISTS mtf_events_symbol_timeframe_idx
 -- =========================================
 -- Scan run tracking
 -- =========================================
+
+-- Dynamic cleanup block to migrate scan_runs back to BIGINT
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'scan_runs' AND column_name = 'created_at' AND data_type LIKE '%timestamp%'
+    ) THEN
+        ALTER TABLE scan_runs ALTER COLUMN created_at DROP DEFAULT;
+        ALTER TABLE scan_runs ALTER COLUMN created_at TYPE BIGINT USING (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS scan_runs (
   id BIGSERIAL PRIMARY KEY,
   run_key TEXT NOT NULL UNIQUE,
@@ -143,16 +161,10 @@ CREATE TABLE IF NOT EXISTS scan_runs (
   timeframe TEXT NOT NULL DEFAULT 'D',
   daily_candle_time BIGINT NOT NULL DEFAULT 0,
   reason TEXT NOT NULL DEFAULT 'n/a',
-  created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at BIGINT NOT NULL DEFAULT 0
 );
 
--- Dynamic fix block for scan_runs.created_at
-DO $$
-BEGIN
-    IF (SELECT data_type FROM information_schema.columns WHERE table_name = 'scan_runs' AND column_name = 'created_at') LIKE '%timestamp%' THEN
-        ALTER TABLE scan_runs ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;
-    END IF;
-END $$;
+ALTER TABLE scan_runs ALTER COLUMN created_at SET DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS scan_runs_symbol_timeframe_idx
   ON scan_runs (symbol, timeframe, daily_candle_time);
