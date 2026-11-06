@@ -45,6 +45,8 @@ function envString(name, defaultValue) {
   return String(raw);
 }
 
+const DEFAULT_BOUNDARY_SCAN_INTERVAL_MS = 15 * 60 * 1000;
+
 module.exports = {
   BYBIT_REST_BASE: envString('BYBIT_REST_BASE', 'https://api.bybit.com'),
   BYBIT_WS_PUBLIC: envString('BYBIT_WS_PUBLIC', 'wss://stream.bybit.com/v5/public/linear'),
@@ -56,9 +58,12 @@ module.exports = {
 
   USE_WS: envBool('USE_WS', true),
   ENABLE_BOUNDARY_SCAN: envBool('ENABLE_BOUNDARY_SCAN', false),
+
   BYBIT_FETCH_RATE_LIMIT_MS: envInt('BYBIT_FETCH_RATE_LIMIT_MS', 250),
   STARTUP_SCAN_MAX_SYMBOLS: envInt('STARTUP_SCAN_MAX_SYMBOLS', 0),
   STARTUP_SCAN_DELAY_MS: envInt('STARTUP_SCAN_DELAY_MS', 0),
+  STARTUP_SCAN_CONCURRENCY: envInt('STARTUP_SCAN_CONCURRENCY', 4),
+  BOUNDARY_SCAN_CONCURRENCY: envInt('BOUNDARY_SCAN_CONCURRENCY', 4),
 
   SYMBOL_SEED_ALL: envBool('SYMBOL_SEED_ALL', true),
 
@@ -106,6 +111,10 @@ module.exports = {
   MIN_TV_RATING: envFloat('MIN_TV_RATING', 0.6),
   MAX_CONSECUTIVE_ROOT_SIGNALS_1D: envInt('MAX_CONSECUTIVE_ROOT_SIGNALS_1D', 2),
 
+  // TV rating toggles
+  TRADINGVIEW_RATING_ENABLED: envBool('TRADINGVIEW_RATING_ENABLED', false),
+  TRADINGVIEW_RATING_ENDPOINT: envString('TRADINGVIEW_RATING_ENDPOINT', ''),
+
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '',
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || '',
   TELEGRAM_SEND_DELAY_MS: envInt('TELEGRAM_SEND_DELAY_MS', 250),
@@ -132,6 +141,7 @@ module.exports = {
   ENABLE_OPEN_TRADES: envBool('ENABLE_OPEN_TRADES', false),
   BYBIT_REST_TIMEOUT_MS: envInt('BYBIT_REST_TIMEOUT_MS', 7000),
 
-  BOUNDARY_SCAN_INTERVAL_MS: envInt('BOUNDARY_SCAN_INTERVAL_MS', 15000),
+  // Critical fix: default boundary scan interval is 15 minutes, not 15 seconds
+  BOUNDARY_SCAN_INTERVAL_MS: envInt('BOUNDARY_SCAN_INTERVAL_MS', DEFAULT_BOUNDARY_SCAN_INTERVAL_MS),
   DAILY_CLEANUP_INTERVAL_MS: envInt('DAILY_CLEANUP_INTERVAL_MS', 24 * 60 * 60 * 1000)
 };
