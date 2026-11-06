@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS open_trades (
 );
 
 -- =========================================
--- Signals table (Includes daily_candle_time natively)
+-- Signals table
 -- =========================================
 CREATE TABLE IF NOT EXISTS signals (
   id BIGSERIAL PRIMARY KEY,
@@ -54,9 +54,18 @@ CREATE TABLE IF NOT EXISTS signals (
   daily_candle_time BIGINT DEFAULT 0
 );
 
--- Ensure columns exist if table was already created previously
+-- Safely add columns if they don't exist
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS daily_candle_time BIGINT;
-ALTER TABLE signals ADD COLUMN IF NOT EXISTS created_at BIGINT;
+
+-- Handle potential data type mismatch on created_at for existing tables
+DO $$ 
+BEGIN
+  BEGIN
+    ALTER TABLE signals ALTER COLUMN created_at TYPE BIGINT USING EXTRACT(EPOCH FROM created_at)::BIGINT;
+  EXCEPTION WHEN others THEN
+    NULL;
+  END;
+END $$;
 
 UPDATE signals
 SET daily_candle_time = 0
