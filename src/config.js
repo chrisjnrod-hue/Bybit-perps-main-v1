@@ -65,7 +65,7 @@ module.exports = {
 
   // Optional symbol allowlist. If empty, the bot fetches symbols once at startup.
   WATCH_SYMBOLS: parseList(process.env.WATCH_SYMBOLS, []),
-  STARTUP_SCAN_MAX_SYMBOLS: envInt('STARTUP_SCAN_MAX_SYMBOLS', 0),
+  STARTUP_SCAN_MAX_SYMBOLS: envInt('STARTUP_SCAN_MAX_SYMBOLS', 50000),
 
   BYBIT_FETCH_RATE_LIMIT_MS: envInt('BYBIT_FETCH_RATE_LIMIT_MS', 250),
   BYBIT_REST_TIMEOUT_MS: envInt('BYBIT_REST_TIMEOUT_MS', 7000),
