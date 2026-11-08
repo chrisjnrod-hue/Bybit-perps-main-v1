@@ -31,8 +31,18 @@ async function upsertSymbol(symbol, base, quote, status = 'active') {
   );
 }
 
+async function listActiveSymbols() {
+  const result = await pool.query(
+    `SELECT symbol FROM symbols WHERE status = 'active' ORDER BY symbol`
+  );
+  return result.rows.map((row) => row.symbol);
+}
+
 async function saveKline(symbol, timeframe, candle) {
   if (!symbol || !timeframe || !candle) return;
+
+  const openTime = Number(candle.open_time || 0);
+  if (!Number.isFinite(openTime) || openTime <= 0) return;
 
   await pool.query(
     `
@@ -48,7 +58,7 @@ async function saveKline(symbol, timeframe, candle) {
     [
       symbol,
       timeframe,
-      Number(candle.open_time || 0),
+      openTime,
       Number(candle.open || 0),
       Number(candle.high || 0),
       Number(candle.low || 0),
@@ -68,14 +78,17 @@ async function getLatestCandles(symbol, timeframe, limit = 200) {
   const result = await pool.query(
     `
     SELECT *
-    FROM klines
-    WHERE symbol = $1 AND timeframe = $2
+    FROM (
+      SELECT *
+      FROM klines
+      WHERE symbol = $1 AND timeframe = $2
+      ORDER BY open_time DESC
+      LIMIT $3
+    ) latest
     ORDER BY open_time ASC
-    LIMIT $3
     `,
     [symbol, timeframe, limit]
   );
-
   return result.rows;
 }
 
@@ -88,7 +101,6 @@ async function listOpenTrades() {
     ORDER BY created_at DESC
     `
   );
-
   return result.rows;
 }
 
@@ -157,7 +169,6 @@ async function saveOpenTrade(trade) {
 }
 
 async function updateOpenTradeStatus(symbol, status, reason = null) {
-  const values = [symbol, status, Date.now()];
   const sql = reason
     ? `
       UPDATE open_trades
@@ -170,7 +181,11 @@ async function updateOpenTradeStatus(symbol, status, reason = null) {
       WHERE symbol = $1
     `;
 
-  await pool.query(sql, reason ? [symbol, status, Date.now(), reason] : values);
+  const params = reason
+    ? [symbol, status, Date.now(), reason]
+    : [symbol, status, Date.now()];
+
+  await pool.query(sql, params);
 }
 
 async function hasRecentSignal(symbol, dailyCandleTime, reason, windowMinutes = 30) {
@@ -189,10 +204,9 @@ async function hasRecentSignal(symbol, dailyCandleTime, reason, windowMinutes = 
       symbol,
       Number(dailyCandleTime || 0),
       String(reason || 'n/a'),
-      Date.now() - (windowMinutes * 60 * 1000)
+      Date.now() - Number(windowMinutes) * 60 * 1000
     ]
   );
-
   return result.rowCount > 0;
 }
 
@@ -200,19 +214,18 @@ async function recordSignal(signal) {
   await pool.query(
     `
     INSERT INTO signals (
-      symbol,
-      timeframe,
-      daily_candle_time,
-      decision,
-      reason,
-      custom_score,
-      tv_score,
-      mtf_status,
-      status,
-      created_at
+      symbol, timeframe, daily_candle_time, decision, reason,
+      custom_score, tv_score, mtf_status, status, created_at
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    ON CONFLICT (symbol, timeframe, daily_candle_time) DO NOTHING
+    ON CONFLICT (symbol, timeframe, daily_candle_time) DO UPDATE SET
+      decision = EXCLUDED.decision,
+      reason = EXCLUDED.reason,
+      custom_score = EXCLUDED.custom_score,
+      tv_score = EXCLUDED.tv_score,
+      mtf_status = EXCLUDED.mtf_status,
+      status = EXCLUDED.status,
+      created_at = EXCLUDED.created_at
     `,
     [
       signal.symbol,
@@ -268,10 +281,70 @@ async function recordMtfEvent(symbol, timeframe, previousState, currentState) {
   );
 }
 
+async function notificationWasSent(runKey) {
+  const result = await pool.query(
+    `SELECT 1 FROM scan_runs WHERE run_key = $1 LIMIT 1`,
+    [runKey]
+  );
+  return result.rowCount > 0;
+}
+
+async function markNotificationSent(runKey, symbol, dailyCandleTime, reason) {
+  await pool.query(
+    `
+    INSERT INTO scan_runs (run_key, symbol, timeframe, daily_candle_time, reason, created_at)
+    VALUES ($1, $2, 'D', $3, $4, $5)
+    ON CONFLICT (run_key) DO NOTHING
+    `,
+    [
+      runKey,
+      symbol,
+      Number(dailyCandleTime || 0),
+      String(reason || 'n/a'),
+      Date.now()
+    ]
+  );
+}
+
+async function purgeStaleCache() {
+  const now = Date.now();
+  const signalsCutoff =
+    now - Number(config.SIGNALS_RETENTION_MS || 30 * 24 * 60 * 60 * 1000);
+  const mtfEventsCutoff =
+    now - Number(config.MTF_EVENTS_RETENTION_MS || 7 * 24 * 60 * 60 * 1000);
+  const scanRunsCutoff =
+    now - Number(config.SCAN_RUNS_RETENTION_MS || 30 * 24 * 60 * 60 * 1000);
+
+  // Retain the newest 200 candles for each symbol/timeframe because indicators
+  // require historical candles. This bounds table growth without removing
+  // the history needed by the strategy.
+  await pool.query(`
+    WITH ranked AS (
+      SELECT ctid,
+        ROW_NUMBER() OVER (
+          PARTITION BY symbol, timeframe
+          ORDER BY open_time DESC
+        ) AS row_num
+      FROM klines
+    )
+    DELETE FROM klines k
+    USING ranked r
+    WHERE k.ctid = r.ctid
+      AND r.row_num > 200
+  `);
+
+  await pool.query(`DELETE FROM signals WHERE created_at < $1`, [signalsCutoff]);
+  await pool.query(`DELETE FROM mtf_events WHERE event_time < $1`, [mtfEventsCutoff]);
+  await pool.query(`DELETE FROM scan_runs WHERE created_at < $1`, [scanRunsCutoff]);
+
+  console.log(`Stale cache cleanup completed at ${new Date(now).toISOString()}`);
+}
+
 module.exports = {
   query,
   pool,
   upsertSymbol,
+  listActiveSymbols,
   saveKline,
   saveKlines,
   getLatestCandles,
@@ -285,5 +358,8 @@ module.exports = {
   getMtfState,
   saveMtfState,
   setMtfState,
-  recordMtfEvent
+  recordMtfEvent,
+  notificationWasSent,
+  markNotificationSent,
+  purgeStaleCache
 };
