@@ -20,7 +20,6 @@ function detectDailyRootSignal(daily = [], ticker = {}) {
   const latest = daily[daily.length - 1];
   const currentOpen = Number(latest?.open || 0);
   const currentPrice = getCurrentPrice(ticker, latest);
-
   const recentCloses = daily
     .slice(-8, -1)
     .map((candle) => Number(candle.close || 0));
@@ -29,16 +28,9 @@ function detectDailyRootSignal(daily = [], ticker = {}) {
 
   const ma7 = sma(recentCloses, 7);
   const openAndPriceAboveMa7 = currentOpen > ma7 && currentPrice > ma7;
-
-  // Must reflect: current daily open-candle histogram positive
-  // after previous closed candle histogram was negative.
-  // If detectBullishHistogramFlip() is implemented against the current open
-  // candle vs last closed candle, it is valid.
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  if (!openAndPriceAboveMa7 && !positiveFlip) {
-    return null;
-  }
+  if (!openAndPriceAboveMa7 && !positiveFlip) return null;
 
   return {
     symbol: ticker.symbol || null,
@@ -79,15 +71,10 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
         ? 'negative'
         : 'neutral';
 
-  // This must be based on the current open candle vs previous closed candle.
   const positiveFlip = detectBullishHistogramFlip(daily);
+  if (!openAndPriceAboveMa7 && !positiveFlip) return null;
 
-  const rootSignal =
-    openAndPriceAboveMa7 || positiveFlip;
-
-  if (!rootSignal) return null;
-
-  // MTF analysis ONLY AFTER 1D root signal passes.
+  // MTF is evaluated only after the daily root criteria pass.
   const mtf = evaluateMtfAlignment({
     '5': candlesByTf['5'] || [],
     '15': candlesByTf['15'] || [],
@@ -105,7 +92,7 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     Number(config.TARGET_POSITION_FRAC || 0.01)
   );
 
-  const score = calculateCustomRating({
+  const customRating = calculateCustomRating({
     macdFlip: positiveFlip,
     openAboveMa7: openAndPriceAboveMa7,
     mtfStatus: mtf.status,
@@ -114,13 +101,11 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     priceBelow14Ma: false
   });
 
-  const tv = await getTradingViewRating(symbol);
+  // Rating retrieval must not fabricate a zero when the service fails.
+  const tvRating = await getTradingViewRating(symbol);
   const previousState = await getMtfState(symbol, 'D');
 
-  const decision =
-    mtf.aligned && liquidity.valid
-      ? 'accept'
-      : 'monitor';
+  const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
 
   let reason = '1D root signal';
   if (openAndPriceAboveMa7 && positiveFlip) {
@@ -137,21 +122,29 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     dailyCandleTime: Number(latestDailyCandle?.open_time || 0) || null,
     decision,
     reason,
+
     dailyHistogram: currentDailyHistogram,
     dailyHistogramDirection,
     macdFlip: positiveFlip,
     openAboveMa7: openAndPriceAboveMa7,
     priceAboveMa7: currentPrice > ma7,
-    customScore: score.score,
-    customScoreLabel: score.label,
-    tvScore: tv.score,
-    tvScoreLabel: tv.label,
+
+    customScore: customRating.score,
+    customScoreLabel: customRating.label,
+
+    // Native TradingView rating: -1 to +1.
+    tvScore: tvRating.available ? tvRating.score : null,
+    tvScorePercent: tvRating.available ? tvRating.percent : null,
+    tvScoreLabel: tvRating.label,
+    tvScoreAvailable: tvRating.available,
+
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
     mtfAligned: mtf.aligned,
     status: decision === 'accept' ? 'new' : 'monitor',
     price: currentPrice,
     liquidity,
+
     mtfTransition:
       previousState?.state && previousState.state !== mtf.status
         ? `${previousState.state}->${mtf.status}`
