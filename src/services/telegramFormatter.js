@@ -13,14 +13,19 @@ function formatTimeframe(tf) {
 function formatMtfValues(mtfValues = {}) {
   return Object.entries(mtfValues)
     .map(([tf, status]) => {
-      const mark = status === 'bullish' ? '✓' : status === 'neutral' ? '–' : '✗';
+      const mark = status === 'bullish'
+        ? '✓'
+        : status === 'neutral'
+          ? '–'
+          : '✗';
+
       return `${formatTimeframe(tf)}: ${mark}`;
     })
     .join(' | ');
 }
 
 function formatSummaryTelegram(signals) {
-  const list = [
+  const symbols = [
     ...new Set(
       (signals || [])
         .map((signal) => String(signal?.symbol || '').trim().toUpperCase())
@@ -29,9 +34,9 @@ function formatSummaryTelegram(signals) {
   ].sort();
 
   return [
-    `Valid 1D signals: ${list.length}`,
+    `Valid 1D signals: ${symbols.length}`,
     'A-Z list:',
-    ...list.map((symbol) => `${symbol}: 1`)
+    ...symbols.map((symbol) => `${symbol}: 1`)
   ].join('\n');
 }
 
@@ -45,23 +50,21 @@ function formatSummaryTelegramChunks(signals, maxLength = 3500) {
   ].sort();
 
   const header = `Valid 1D signals: ${symbols.length}\nA-Z list:`;
-
   const chunks = [];
   let lines = [];
   let currentLength = header.length;
 
   for (const symbol of symbols) {
     const line = `${symbol}: 1`;
-    const pendingLength = line.length + 1;
 
-    if (lines.length && currentLength + pendingLength > maxLength) {
+    if (lines.length && currentLength + line.length + 1 > maxLength) {
       chunks.push(`${header}\n${lines.join('\n')}`);
       lines = [];
       currentLength = header.length;
     }
 
     lines.push(line);
-    currentLength += pendingLength;
+    currentLength += line.length + 1;
   }
 
   if (lines.length || chunks.length === 0) {
@@ -69,6 +72,19 @@ function formatSummaryTelegramChunks(signals, maxLength = 3500) {
   }
 
   return chunks;
+}
+
+function formatTvRating(signal) {
+  if (signal?.tvScoreAvailable !== true || !Number.isFinite(Number(signal.tvScore))) {
+    return 'N/A (unavailable)';
+  }
+
+  const raw = Number(signal.tvScore).toFixed(2);
+  const percent = Number.isFinite(Number(signal.tvScorePercent))
+    ? `, ${Number(signal.tvScorePercent).toFixed(1)}%`
+    : '';
+
+  return `${raw} / 1${percent} (${signal.tvScoreLabel || 'unrated'})`;
 }
 
 function formatMtfAlignmentAlert(signal) {
@@ -79,8 +95,8 @@ function formatMtfAlignmentAlert(signal) {
     `Time: ${signal.time || new Date().toISOString()}`,
     `1D Trigger: ${signal.reason || 'n/a'}`,
     `Decision: ${signal.decision || 'monitor'}`,
-    `Custom score: ${signal.customScore ?? 'N/A'}`,
-    `TV score: ${signal.tvScore ?? 'N/A'}`,
+    `TradingView technical rating: ${formatTvRating(signal)}`,
+    `Custom score: ${signal.customScore ?? 'N/A'} (${signal.customScoreLabel || 'unrated'})`,
     `MTF status: ${signal.mtfStatus || 'neutral'} [${tfString}]`,
     `Price: ${signal.price ?? 'N/A'}`,
     `Volume 24h: ${signal.volume24h ?? 'N/A'}`,
@@ -94,12 +110,15 @@ function formatMtfAlignmentAlert(signal) {
 
 function formatRecommendationTelegram(item) {
   const tfString = formatMtfValues(item.mtfValues || {});
+  const tvRating = item.tvScoreAvailable === true && Number.isFinite(Number(item.tvScore))
+    ? `${Number(item.tvScore).toFixed(2)} / 1 (${item.tvScoreLabel || 'unrated'})`
+    : 'N/A (unavailable)';
 
   return [
     `Recommended Trade: ${item.symbol}`,
     `Action: ${item.action}`,
-    `Custom Score: ${item.customScore}`,
-    `TV Score: ${item.tvScore}`,
+    `TradingView technical rating: ${tvRating}`,
+    `Custom score: ${item.customScore} (${item.customScoreLabel || 'unrated'})`,
     `MTF Status: ${item.mtfStatus} [${tfString}]`,
     `Liquidity: ${item.liquidity}`,
     `Reason: ${item.reason}`
