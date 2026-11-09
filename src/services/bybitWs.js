@@ -1,24 +1,35 @@
+// src/services/bybitWs.js
 const WebSocket = require('ws');
 const EventEmitter = require('events');
 const config = require('../config');
+
+const MAX_SUBSCRIBE_ARGS_PER_MESSAGE = 10;
 
 class BybitWS extends EventEmitter {
   constructor() {
     super();
     this.socket = null;
     this.connected = false;
-    this.url = config.BYBIT_WS_PUBLIC || 'wss://stream.bybit.com/v5/public/linear';
+    this.url =
+      config.BYBIT_WS_PUBLIC || 'wss://stream.bybit.com/v5/public/linear';
+
     this.subscribedTopics = new Set();
     this.tickerCache = new Map();
     this.orderBookCache = new Map();
+
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
     this.pingTimer = null;
     this.closedByUser = false;
+    this.isReconnecting = false;
+  }
+
+  isEnabled() {
+    return !!config.USE_WS;
   }
 
   connect() {
-    if (!config.USE_WS) {
+    if (!this.isEnabled()) {
       console.log('WS disabled by config');
       return null;
     }
@@ -38,15 +49,38 @@ class BybitWS extends EventEmitter {
     this.socket.on('open', () => {
       this.connected = true;
       this.reconnectAttempts = 0;
+      this.isReconnecting = false;
+
       console.log('Bybit WS connected');
       this.emit('connected');
+
       this.sendSubscriptions();
       this.startPing();
     });
 
     this.socket.on('message', (raw) => {
       try {
-        this.handleMessage(JSON.parse(raw.toString()));
+        const message = JSON.parse(raw.toString());
+
+        // Handle server ack / reject messages.
+        if (message && typeof message === 'object' && message.op) {
+          if (message.op === 'subscribe' || message.op === 'unsubscribe') {
+            if (Number(message.retCode) !== 0) {
+              console.warn('[Bybit WS]', {
+                op: message.op,
+                retCode: message.retCode,
+                retMsg: message.retMsg,
+                reqId: message.reqId || null
+              });
+            } else {
+              // success; no noisy log
+            }
+          }
+        }
+
+        if (message?.topic) {
+          this.handleMessage(message);
+        }
       } catch (err) {
         console.error('WS message parse error:', err.message);
       }
@@ -66,18 +100,42 @@ class BybitWS extends EventEmitter {
     return this.socket;
   }
 
+  disconnect() {
+    this.closedByUser = true;
+    this.stopPing();
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.close();
+    }
+
+    this.socket = null;
+    this.connected = false;
+  }
+
   startPing() {
     this.stopPing();
+
     this.pingTimer = setInterval(() => {
-      if (this.socket?.readyState === WebSocket.OPEN) {
-        this.socket.send(JSON.stringify({ op: 'ping' }));
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        try {
+          this.socket.send(JSON.stringify({ op: 'ping' }));
+        } catch (err) {
+          console.error('WS ping send failed:', err.message);
+        }
       }
     }, 20000);
   }
 
   stopPing() {
-    if (this.pingTimer) clearInterval(this.pingTimer);
-    this.pingTimer = null;
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   scheduleReconnect() {
@@ -90,10 +148,17 @@ class BybitWS extends EventEmitter {
     }
 
     this.reconnectAttempts += 1;
+    this.isReconnecting = true;
+
     const base = Number(config.WS_RECONNECT_DELAY_MS || 800);
     const factor = Number(config.WS_RECONNECT_BACKOFF_FACTOR || 2);
     const max = Number(config.WS_RECONNECT_MAX_MS || 24000);
-    const wait = Math.min(max, base * (factor ** (this.reconnectAttempts - 1)));
+    const wait = Math.min(
+      max,
+      base * factor ** (this.reconnectAttempts - 1)
+    );
+
+    console.warn(`[Bybit WS] reconnecting in ${wait}ms (attempt ${this.reconnectAttempts})`);
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -101,38 +166,51 @@ class BybitWS extends EventEmitter {
     }, wait);
   }
 
-  subscribe(symbols, timeframes = ['5', '15', '60', '240', 'D']) {
-    const topics = [];
+  addTopic(topic) {
+    if (!topic) return;
+    this.subscribedTopics.add(topic);
+  }
 
-    for (const symbol of [...new Set(symbols || [])]) {
-      if (!symbol) continue;
+  subscribe(symbols, timeframes = ['5', '15', '60', '240', 'D']) {
+    const list = Array.from(new Set(symbols || [])).filter(Boolean);
+
+    for (const symbol of list) {
+      this.addTopic(`tickers.${symbol}`);
+      this.addTopic(`orderbook.50.${symbol}`);
+
       for (const timeframe of timeframes) {
-        topics.push(`kline.${timeframe}.${symbol}`);
+        this.addTopic(`kline.${timeframe}.${symbol}`);
       }
-      topics.push(`tickers.${symbol}`);
-      topics.push(`orderbook.50.${symbol}`);
     }
 
-    for (const topic of topics) this.subscribedTopics.add(topic);
     this.sendSubscriptions();
   }
 
   sendSubscriptions() {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
 
-    const topics = [...this.subscribedTopics];
-    const chunkSize = Math.max(1, Number(config.WS_SUBSCRIBE_CHUNK || 30));
+    const topics = Array.from(this.subscribedTopics);
+    if (!topics.length) return;
 
-    for (let i = 0; i < topics.length; i += chunkSize) {
-      this.socket.send(JSON.stringify({
-        op: 'subscribe',
-        args: topics.slice(i, i + chunkSize)
-      }));
+    for (let i = 0; i < topics.length; i += MAX_SUBSCRIBE_ARGS_PER_MESSAGE) {
+      const chunk = topics.slice(i, i + MAX_SUBSCRIBE_ARGS_PER_MESSAGE);
+
+      try {
+        this.socket.send(
+          JSON.stringify({
+            op: 'subscribe',
+            args: chunk
+          })
+        );
+      } catch (err) {
+        console.error('Failed to send WS subscription batch:', err.message);
+      }
     }
   }
 
   handleMessage(msg) {
     const topic = String(msg?.topic || '');
+
     if (!topic) return;
 
     if (topic.startsWith('kline.')) {
@@ -192,14 +270,14 @@ class BybitWS extends EventEmitter {
 
     const bids = book
       ? [...book.bids.entries()]
-        .map(([price, quantity]) => [Number(price), Number(quantity)])
-        .sort((a, b) => b[0] - a[0])
+          .map(([price, quantity]) => [Number(price), Number(quantity)])
+          .sort((a, b) => b[0] - a[0])
       : [];
 
     const asks = book
       ? [...book.asks.entries()]
-        .map(([price, quantity]) => [Number(price), Number(quantity)])
-        .sort((a, b) => a[0] - b[0])
+          .map(([price, quantity]) => [Number(price), Number(quantity)])
+          .sort((a, b) => a[0] - b[0])
       : [];
 
     return {
