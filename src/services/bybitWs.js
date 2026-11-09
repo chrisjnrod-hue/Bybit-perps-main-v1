@@ -1,4 +1,3 @@
-// src/services/bybitWs.js
 const WebSocket = require('ws');
 const EventEmitter = require('events');
 const config = require('../config');
@@ -62,24 +61,32 @@ class BybitWS extends EventEmitter {
       try {
         const message = JSON.parse(raw.toString());
 
-        // Handle server ack / reject messages.
-        if (message && typeof message === 'object' && message.op) {
-          if (message.op === 'subscribe' || message.op === 'unsubscribe') {
-            if (Number(message.retCode) !== 0) {
-              console.warn('[Bybit WS]', {
-                op: message.op,
-                retCode: message.retCode,
-                retMsg: message.retMsg,
-                reqId: message.reqId || null
+        if (message && typeof message === 'object') {
+          const type = message.type || message.op;
+          const success =
+            message.success ??
+            (message.retCode === 0 || message.ret_code === 0 || message.code === 0);
+
+          if (type === 'subscribe' || type === 'unsubscribe' || type === 'error') {
+            if (!success) {
+              console.warn('[Bybit WS subscription status]', {
+                type,
+                success,
+                code: message.code ?? message.retCode ?? message.ret_code ?? null,
+                ret_msg:
+                  message.ret_msg ??
+                  message.retMsg ??
+                  message.retMessage ??
+                  null,
+                msg: message.msg ?? null,
+                req_id: message.req_id ?? message.reqId ?? null
               });
-            } else {
-              // success; no noisy log
             }
           }
-        }
 
-        if (message?.topic) {
-          this.handleMessage(message);
+          if (message.topic) {
+            this.handleMessage(message);
+          }
         }
       } catch (err) {
         console.error('WS message parse error:', err.message);
@@ -158,7 +165,9 @@ class BybitWS extends EventEmitter {
       base * factor ** (this.reconnectAttempts - 1)
     );
 
-    console.warn(`[Bybit WS] reconnecting in ${wait}ms (attempt ${this.reconnectAttempts})`);
+    console.warn(
+      `[Bybit WS] reconnecting in ${wait}ms (attempt ${this.reconnectAttempts})`
+    );
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -228,6 +237,7 @@ class BybitWS extends EventEmitter {
         data: { ...previous, ...incoming },
         updatedAt: Date.now()
       });
+
       this.emit('market', symbol);
       return;
     }
