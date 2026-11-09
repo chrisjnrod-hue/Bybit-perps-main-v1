@@ -21,6 +21,7 @@ class BybitWS extends EventEmitter {
     this.pingTimer = null;
     this.closedByUser = false;
     this.isReconnecting = false;
+    this.connectionTimestamp = 0;
   }
 
   isEnabled() {
@@ -47,7 +48,7 @@ class BybitWS extends EventEmitter {
 
     this.socket.on('open', () => {
       this.connected = true;
-      this.reconnectAttempts = 0;
+      this.connectionTimestamp = Date.now();
       this.isReconnecting = false;
 
       console.log('Bybit WS connected');
@@ -67,21 +68,8 @@ class BybitWS extends EventEmitter {
             message.success ??
             (message.retCode === 0 || message.ret_code === 0 || message.code === 0);
 
-          if (type === 'subscribe' || type === 'unsubscribe' || type === 'error') {
-            if (!success) {
-              console.warn('[Bybit WS subscription status]', {
-                type,
-                success,
-                code: message.code ?? message.retCode ?? message.ret_code ?? null,
-                ret_msg:
-                  message.ret_msg ??
-                  message.retMsg ??
-                  message.retMessage ??
-                  null,
-                msg: message.msg ?? null,
-                req_id: message.req_id ?? message.reqId ?? null
-              });
-            }
+          if (!success && (type === 'subscribe' || type === 'unsubscribe' || type === 'error')) {
+            console.warn('[Bybit WS error/rejection]', message);
           }
 
           if (message.topic) {
@@ -93,9 +81,18 @@ class BybitWS extends EventEmitter {
       }
     });
 
-    this.socket.on('close', () => {
+    this.socket.on('close', (code, reason) => {
       this.connected = false;
       this.stopPing();
+      
+      const uptime = Date.now() - this.connectionTimestamp;
+      console.warn(`Bybit WS closed. Code: ${code}, Reason: ${reason || 'none'}, Uptime: ${uptime}ms`);
+
+      // Only reset reconnect attempts if connection was stable for > 30 seconds
+      if (uptime > 30000) {
+        this.reconnectAttempts = 0;
+      }
+
       this.emit('disconnected');
       this.scheduleReconnect();
     });
@@ -130,7 +127,12 @@ class BybitWS extends EventEmitter {
     this.pingTimer = setInterval(() => {
       if (this.socket && this.socket.readyState === WebSocket.OPEN) {
         try {
-          this.socket.send(JSON.stringify({ op: 'ping' }));
+          this.socket.send(
+            JSON.stringify({
+              req_id: `ping_${Date.now()}`,
+              op: 'ping'
+            })
+          );
         } catch (err) {
           console.error('WS ping send failed:', err.message);
         }
