@@ -1,3 +1,4 @@
+// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -106,7 +107,10 @@ async function getCandles(symbol, timeframe) {
 
 async function getDailyRoot(symbol) {
   const dailyCandles = await getCandles(symbol, 'D');
-  if (dailyCandles.length < 8) return null;
+
+  if (!Array.isArray(dailyCandles) || dailyCandles.length < 8) {
+    return null;
+  }
 
   const marketData = await getMarketDataCached(symbol);
   const root = detectDailyRootSignal(dailyCandles, {
@@ -255,7 +259,6 @@ async function flushTradeCandidateQueue() {
 }
 
 async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
-  // Apply the 1D root filter first. Do not query/evaluate MTF data before it passes.
   const daily = await getDailyRoot(symbol);
   if (!daily) return null;
 
@@ -319,9 +322,6 @@ async function handleKline(msg) {
 
   const bufferKey = `${details.symbol}:${details.timeframe}`;
 
-  // While REST history is being seeded, retain the newest live update for
-  // each symbol/timeframe, then apply it after the seed so it cannot be
-  // overwritten by an older REST candle.
   if (seedingHistory) {
     const previous = bufferedKlines.get(bufferKey);
     if (!previous || candle.open_time >= previous.candle.open_time) {
@@ -376,8 +376,7 @@ async function processSymbol(symbol) {
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
-  // Clear the short market-data cache so the next check sees the latest
-  // WebSocket ticker/order-book values.
+  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
@@ -400,6 +399,7 @@ async function discoverSymbols() {
 
   const selected = filterUsdtPerpetualSymbols(instruments);
   const maxSymbols = Number(config.STARTUP_SCAN_MAX_SYMBOLS || 0);
+
   const finalSymbols = maxSymbols > 0
     ? selected.slice(0, maxSymbols)
     : selected;
@@ -458,9 +458,7 @@ async function seedHistoricalCandles(symbolList) {
   }
 
   const workerCount = Math.min(concurrency, symbolList.length);
-  await Promise.all(
-    Array.from({ length: workerCount }, () => worker())
-  );
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 }
 
 function rootSummaryKey(root) {
@@ -479,7 +477,6 @@ async function sendRootSummary(roots, scanType) {
 
   if (unseen.length === 0) {
     if (scanType === 'boundary') {
-      // Timestamp makes each empty interval a distinct message.
       await sendTelegramBlock(
         'No new root signals at this scan interval.',
         `no-new-root:${Date.now()}`
@@ -509,7 +506,6 @@ async function sendRootSummary(roots, scanType) {
     }
   }
 
-  // Persist root dedupe only after all summary chunks were sent successfully.
   if (allChunksSent) {
     for (const root of unseen) {
       await markNotificationSent(
@@ -549,8 +545,6 @@ async function collectCurrentRoots(symbolList) {
 async function dispatchRoots(roots) {
   for (const root of roots) {
     try {
-      // Re-evaluate MTF for every current root. A root reported earlier can
-      // still produce its first alignment alert later, but not another summary.
       const evaluated = await evaluateSymbol(root.symbol);
       if (!evaluated) continue;
 
@@ -569,7 +563,6 @@ async function runInitialScan(symbolList) {
   try {
     const roots = await collectCurrentRoots(symbolList);
 
-    // Send the standalone initial summary before processing MTF alerts.
     await sendRootSummary(roots, 'startup');
     await dispatchRoots(roots);
   } finally {
@@ -586,11 +579,8 @@ async function runBoundaryScan() {
   try {
     const roots = await collectCurrentRoots([...symbols]);
 
-    // The persistent root key is shared with the initial scan. Previously
-    // reported roots are excluded from this boundary summary.
     await sendRootSummary(roots, 'boundary');
 
-    // Keep monitoring all current root signals for a first MTF alignment alert.
     await dispatchRoots(roots);
   } catch (error) {
     console.error('Boundary scan failed:', error);
@@ -618,8 +608,6 @@ function nextWallClockBoundaryDelayMs() {
     Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000)
   );
 
-  // Align to Unix time boundaries. With the default 15 minutes, this runs
-  // at :00, :15, :30, and :45 UTC.
   const remainder = Date.now() % interval;
   return remainder === 0 ? interval : interval - remainder;
 }
@@ -704,39 +692,30 @@ async function bootstrapStrategy() {
 
   if (!config.USE_WS) {
     throw new Error(
-      'This strategyEngine uses REST only for startup discovery/history and requires USE_WS=true for live operation.'
+      'This strategyEngine requires USE_WS=true for live operation.'
     );
   }
 
-  // REST startup bootstrap: discover symbols once.
   const symbolList = await discoverSymbols();
 
-  // Connect and subscribe before seeding. Live updates are buffered so a
-  // REST history response cannot overwrite newer WS candle data.
   bybitWs.on('kline', handleKline);
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
+
+  // Important: subscribe in a safe way; bybitWs now chunks to <=10 topics per request.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
   try {
-    // REST startup bootstrap: seed history once per process startup.
     await seedHistoricalCandles(symbolList);
   } finally {
     seedingHistory = false;
   }
 
-  // Apply live candles received during the history seed after the historical
-  // rows have been inserted.
   await replayBufferedKlines();
-
-  // Give ticker/order-book subscriptions a short chance to deliver snapshots.
   await waitForWebSocketSnapshots(config.WS_INITIAL_SCAN_TIMEOUT);
 
   await performDailyCleanup();
-
-  // Initial summary is a distinct Telegram message, followed by separate MTF
-  // alerts/recommendations. Persistent keys stop the roots repeating later.
   await runInitialScan(symbolList);
 
   startupReady = true;
