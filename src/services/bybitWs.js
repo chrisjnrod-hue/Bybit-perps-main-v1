@@ -54,7 +54,8 @@ class BybitWS extends EventEmitter {
       console.log('Bybit WS connected');
       this.emit('connected');
 
-      this.sendSubscriptions();
+      // Dispatch subscriptions asynchronously with throttling
+      void this.sendSubscriptions();
       this.startPing();
     });
 
@@ -194,25 +195,32 @@ class BybitWS extends EventEmitter {
       }
     }
 
-    this.sendSubscriptions();
+    void this.sendSubscriptions();
   }
 
-  sendSubscriptions() {
+  async sendSubscriptions() {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
 
     const topics = Array.from(this.subscribedTopics);
     if (!topics.length) return;
 
     for (let i = 0; i < topics.length; i += MAX_SUBSCRIBE_ARGS_PER_MESSAGE) {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) break;
+
       const chunk = topics.slice(i, i + MAX_SUBSCRIBE_ARGS_PER_MESSAGE);
 
       try {
         this.socket.send(
           JSON.stringify({
+            req_id: `sub_${Date.now()}_${i}`,
             op: 'subscribe',
             args: chunk
           })
         );
+        console.log(`[Bybit WS] Sent subscription batch (${chunk.length} topics)`);
+
+        // Throttle subscription batches by 150ms to prevent rate limiting / drops
+        await new Promise((resolve) => setTimeout(resolve, 150));
       } catch (err) {
         console.error('Failed to send WS subscription batch:', err.message);
       }
