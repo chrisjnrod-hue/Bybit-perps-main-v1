@@ -1,4 +1,3 @@
-const { getTechnicalAnalysis } = require('@mathieuc/tradingview/data');
 const config = require('../config');
 
 const ratingCache = new Map();
@@ -20,7 +19,6 @@ function isEnabled(value) {
 }
 
 async function getTradingViewRating(symbol) {
-  // Normalize symbol for TradingView exchange prefix (Bybit perpetual symbols map to BINANCE or BYBIT exchange)
   const cleanSymbol = String(symbol || '').trim().toUpperCase();
   const tvSymbol = cleanSymbol.includes(':') ? cleanSymbol : `BINANCE:${cleanSymbol}`;
 
@@ -54,13 +52,15 @@ async function getTradingViewRating(symbol) {
   try {
     const interval = String(config.TRADINGVIEW_RATING_INTERVAL || '1D');
     
-    // Fetch technical summary directly via wrapper package
+    // Dynamically import the ES Module to bypass CommonJS require restrictions
+    const tvModule = await import('@mathieuc/tradingview/data');
+    const getTechnicalAnalysis = tvModule.getTechnicalAnalysis;
+
     const analysis = await getTechnicalAnalysis({
       symbol: tvSymbol,
       interval: interval
     });
 
-    // Extract recommendation summary value (typically ranges from -1 to 1 or oscillator/moving average consensus)
     const rawRecommendation = analysis?.recommendation?.value ?? analysis?.summary?.RECOMMENDATION;
     
     let score = null;
@@ -100,7 +100,7 @@ async function getTradingViewRating(symbol) {
 
     return rating;
   } catch (error) {
-    console.error(`[tradingviewRating] Wrapper request failed for ${cleanSymbol}:`, error.message);
+    console.error(`[tradingviewRating] Dynamic import/wrapper request failed for ${cleanSymbol}:`, error.message);
 
     return {
       available: false,
