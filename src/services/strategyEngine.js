@@ -1,4 +1,3 @@
-// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -39,6 +38,7 @@ const { setupKeepAlive } = require('./keepalive');
 
 const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
 const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
+const MTF_BOUNDARY_INTERVAL_MS = 5 * 60 * 1000;
 
 const ROOT_SUMMARY_PREFIX = 'root-summary';
 const ALIGNMENT_PREFIX = 'mtf-alignment';
@@ -51,7 +51,6 @@ const TRADE_RANKING_WINDOW_MS = 1000;
 let bootstrapped = false;
 let startupReady = false;
 let seedingHistory = false;
-let batchScanRunning = false;
 let boundaryScanRunning = false;
 let cleanupRunning = false;
 let lastCleanupAt = 0;
@@ -63,6 +62,7 @@ const pendingEvaluations = new Map();
 const deferredSymbols = new Set();
 const bufferedKlines = new Map();
 const tradeCandidates = new Map();
+const evaluatingSymbols = new Set();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -152,7 +152,9 @@ function alertData(signal, marketData) {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
+  // Send an alignment alert when MTFs align, even if another condition
+  // (such as liquidity) means the trade decision is still "monitor".
+  if (signal?.mtfAligned !== true) {
     return false;
   }
 
@@ -172,6 +174,7 @@ async function maybeSendAlignmentAlert(signal, marketData) {
     signal.dailyCandleTime,
     signal.reason
   );
+
   return true;
 }
 
@@ -262,10 +265,14 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
   const daily = await getDailyRoot(symbol);
   if (!daily) return null;
 
-  const mtfCandles = {};
-  for (const timeframe of MTF_TIMEFRAMES) {
-    mtfCandles[timeframe] = await getCandles(symbol, timeframe);
-  }
+  const mtfEntries = await Promise.all(
+    MTF_TIMEFRAMES.map(async (timeframe) => [
+      timeframe,
+      await getCandles(symbol, timeframe)
+    ])
+  );
+
+  const mtfCandles = Object.fromEntries(mtfEntries);
 
   const signal = await evaluateSignal(
     symbol,
@@ -361,22 +368,34 @@ function scheduleSymbolEvaluation(symbol) {
 }
 
 async function processSymbol(symbol) {
-  if (!startupReady || batchScanRunning) {
+  if (!startupReady) {
     deferredSymbols.add(symbol);
     return;
   }
+
+  if (evaluatingSymbols.has(symbol)) {
+    deferredSymbols.add(symbol);
+    return;
+  }
+
+  evaluatingSymbols.add(symbol);
 
   try {
     await evaluateSymbol(symbol);
   } catch (error) {
     console.error(`Signal evaluation failed for ${symbol}:`, error);
+  } finally {
+    evaluatingSymbols.delete(symbol);
+
+    if (deferredSymbols.delete(symbol)) {
+      scheduleSymbolEvaluation(symbol);
+    }
   }
 }
 
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
-  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
@@ -558,15 +577,13 @@ async function dispatchRoots(roots) {
 }
 
 async function runInitialScan(symbolList) {
-  batchScanRunning = true;
-
   try {
     const roots = await collectCurrentRoots(symbolList);
 
     await sendRootSummary(roots, 'startup');
     await dispatchRoots(roots);
   } finally {
-    batchScanRunning = false;
+    await drainDeferredSymbols();
   }
 }
 
@@ -574,42 +591,37 @@ async function runBoundaryScan() {
   if (boundaryScanRunning) return;
 
   boundaryScanRunning = true;
-  batchScanRunning = true;
 
   try {
     const roots = await collectCurrentRoots([...symbols]);
 
     await sendRootSummary(roots, 'boundary');
-
     await dispatchRoots(roots);
   } catch (error) {
     console.error('Boundary scan failed:', error);
   } finally {
-    batchScanRunning = false;
     boundaryScanRunning = false;
     await drainDeferredSymbols();
   }
 }
 
 async function drainDeferredSymbols() {
-  if (!startupReady || batchScanRunning || deferredSymbols.size === 0) return;
+  if (!startupReady || deferredSymbols.size === 0) return;
 
   const pending = [...deferredSymbols];
   deferredSymbols.clear();
 
   for (const symbol of pending) {
-    void processSymbol(symbol);
+    scheduleSymbolEvaluation(symbol);
   }
 }
 
 function nextWallClockBoundaryDelayMs() {
-  const interval = Math.max(
-    60000,
-    Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000)
-  );
+  const remainder = Date.now() % MTF_BOUNDARY_INTERVAL_MS;
 
-  const remainder = Date.now() % interval;
-  return remainder === 0 ? interval : interval - remainder;
+  return remainder === 0
+    ? MTF_BOUNDARY_INTERVAL_MS
+    : MTF_BOUNDARY_INTERVAL_MS - remainder;
 }
 
 function scheduleNextBoundary() {
@@ -634,9 +646,11 @@ async function performDailyCleanup() {
 
   try {
     await purgeStaleCache();
+
     if (typeof bybitWs.cleanupCache === 'function') {
       bybitWs.cleanupCache(interval);
     }
+
     lastCleanupAt = Date.now();
   } catch (error) {
     console.error('Daily cache cleanup failed:', error);
@@ -701,8 +715,6 @@ async function bootstrapStrategy() {
   bybitWs.on('kline', handleKline);
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
-
-  // Important: subscribe in a safe way; bybitWs now chunks to <=10 topics per request.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
@@ -714,11 +726,12 @@ async function bootstrapStrategy() {
 
   await replayBufferedKlines();
   await waitForWebSocketSnapshots(config.WS_INITIAL_SCAN_TIMEOUT);
-
   await performDailyCleanup();
-  await runInitialScan(symbolList);
 
+  // Allow live WebSocket-triggered evaluations during the initial scan.
   startupReady = true;
+
+  await runInitialScan(symbolList);
   await drainDeferredSymbols();
 
   const cleanupInterval = Number(
