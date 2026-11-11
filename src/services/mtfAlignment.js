@@ -7,8 +7,9 @@ function histogramDirection(candles) {
     return 'neutral';
   }
 
-  const value = macdHistogram(candles);
+  const value = Number(macdHistogram(candles));
 
+  if (!Number.isFinite(value)) return 'neutral';
   if (value > 0) return 'bullish';
   if (value < 0) return 'negative';
   return 'neutral';
@@ -16,14 +17,44 @@ function histogramDirection(candles) {
 
 function evaluateMtfAlignment(candlesByTf = {}) {
   const values = {};
+  const previousValues = {};
+  const flippedBullish = [];
 
   for (const tf of REQUIRED_MTF_TFS) {
-    values[tf] = histogramDirection(candlesByTf[tf] || []);
+    const candles = Array.isArray(candlesByTf[tf])
+      ? candlesByTf[tf]
+      : [];
+
+    const currentDirection = histogramDirection(candles);
+
+    // Exclude the current, forming candle to get the previous candle's
+    // histogram direction.
+    const previousDirection = candles.length > 1
+      ? histogramDirection(candles.slice(0, -1))
+      : 'neutral';
+
+    values[tf] = currentDirection;
+    previousValues[tf] = previousDirection;
+
+    if (
+      currentDirection === 'bullish' &&
+      previousDirection === 'negative'
+    ) {
+      flippedBullish.push(tf);
+    }
   }
 
-  const bullishCount = REQUIRED_MTF_TFS.filter((tf) => values[tf] === 'bullish').length;
-  const negativeCount = REQUIRED_MTF_TFS.filter((tf) => values[tf] === 'negative').length;
-  const neutralCount = REQUIRED_MTF_TFS.filter((tf) => values[tf] === 'neutral').length;
+  const bullishCount = REQUIRED_MTF_TFS.filter(
+    (tf) => values[tf] === 'bullish'
+  ).length;
+
+  const negativeCount = REQUIRED_MTF_TFS.filter(
+    (tf) => values[tf] === 'negative'
+  ).length;
+
+  const neutralCount = REQUIRED_MTF_TFS.filter(
+    (tf) => values[tf] === 'neutral'
+  ).length;
 
   const aligned = bullishCount === REQUIRED_MTF_TFS.length;
 
@@ -35,7 +66,10 @@ function evaluateMtfAlignment(candlesByTf = {}) {
   return {
     status,
     values,
+    previousValues,
     aligned,
+    alignmentFlip: aligned && flippedBullish.length > 0,
+    flippedBullish,
     bullish: bullishCount,
     negative: negativeCount,
     neutral: neutralCount
