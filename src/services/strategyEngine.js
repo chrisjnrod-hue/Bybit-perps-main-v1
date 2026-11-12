@@ -1,4 +1,3 @@
-// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -39,6 +38,7 @@ const { setupKeepAlive } = require('./keepalive');
 
 const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
 const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
+const MTF_BOUNDARY_INTERVAL_MS = 5 * 60 * 1000;
 
 const ROOT_SUMMARY_PREFIX = 'root-summary';
 const ALIGNMENT_PREFIX = 'mtf-alignment';
@@ -51,7 +51,6 @@ const TRADE_RANKING_WINDOW_MS = 1000;
 let bootstrapped = false;
 let startupReady = false;
 let seedingHistory = false;
-let batchScanRunning = false;
 let boundaryScanRunning = false;
 let cleanupRunning = false;
 let lastCleanupAt = 0;
@@ -63,6 +62,11 @@ const pendingEvaluations = new Map();
 const deferredSymbols = new Set();
 const bufferedKlines = new Map();
 const tradeCandidates = new Map();
+const evaluatingSymbols = new Set();
+
+// A discovered root remains eligible for MTF monitoring for the rest of its
+// daily candle, even if its original root condition later stops being true.
+const monitoredRoots = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -109,22 +113,49 @@ async function getDailyRoot(symbol) {
   const dailyCandles = await getCandles(symbol, 'D');
 
   if (!Array.isArray(dailyCandles) || dailyCandles.length < 8) {
+    monitoredRoots.delete(symbol);
     return null;
   }
 
   const marketData = await getMarketDataCached(symbol);
-  const root = detectDailyRootSignal(dailyCandles, {
+  const latestDailyCandle = dailyCandles[dailyCandles.length - 1];
+  const dailyCandleTime = Number(latestDailyCandle?.open_time || 0) || null;
+
+  const detectedRoot = detectDailyRootSignal(dailyCandles, {
     symbol,
     lastPrice: marketData.lastPrice
   });
 
-  if (!root) return null;
+  if (detectedRoot) {
+    const root = { ...detectedRoot, symbol };
 
-  return {
-    root: { ...root, symbol },
-    dailyCandles,
-    marketData
-  };
+    monitoredRoots.set(symbol, {
+      dailyCandleTime,
+      root
+    });
+
+    return {
+      root,
+      dailyCandles,
+      marketData,
+      rootActive: true
+    };
+  }
+
+  const monitored = monitoredRoots.get(symbol);
+
+  // A root only remains active for the daily candle on which it was found.
+  if (monitored && monitored.dailyCandleTime === dailyCandleTime) {
+    return {
+      root: monitored.root,
+      dailyCandles,
+      marketData,
+      rootActive: true
+    };
+  }
+
+  monitoredRoots.delete(symbol);
+  return null;
 }
 
 function alertData(signal, marketData) {
@@ -152,7 +183,9 @@ function alertData(signal, marketData) {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
+  // All required MTFs must be bullish. Trade acceptance/liquidity is a
+  // separate decision and must not suppress the alignment alert.
+  if (signal?.mtfAligned !== true) {
     return false;
   }
 
@@ -172,6 +205,7 @@ async function maybeSendAlignmentAlert(signal, marketData) {
     signal.dailyCandleTime,
     signal.reason
   );
+
   return true;
 }
 
@@ -262,15 +296,20 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
   const daily = await getDailyRoot(symbol);
   if (!daily) return null;
 
-  const mtfCandles = {};
-  for (const timeframe of MTF_TIMEFRAMES) {
-    mtfCandles[timeframe] = await getCandles(symbol, timeframe);
-  }
+  const mtfEntries = await Promise.all(
+    MTF_TIMEFRAMES.map(async (timeframe) => [
+      timeframe,
+      await getCandles(symbol, timeframe)
+    ])
+  );
+
+  const mtfCandles = Object.fromEntries(mtfEntries);
 
   const signal = await evaluateSignal(
     symbol,
     { ...mtfCandles, D: daily.dailyCandles },
-    daily.marketData
+    daily.marketData,
+    { rootActive: daily.rootActive }
   );
 
   if (!signal) return null;
@@ -361,22 +400,34 @@ function scheduleSymbolEvaluation(symbol) {
 }
 
 async function processSymbol(symbol) {
-  if (!startupReady || batchScanRunning) {
+  if (!startupReady) {
     deferredSymbols.add(symbol);
     return;
   }
+
+  if (evaluatingSymbols.has(symbol)) {
+    deferredSymbols.add(symbol);
+    return;
+  }
+
+  evaluatingSymbols.add(symbol);
 
   try {
     await evaluateSymbol(symbol);
   } catch (error) {
     console.error(`Signal evaluation failed for ${symbol}:`, error);
+  } finally {
+    evaluatingSymbols.delete(symbol);
+
+    if (deferredSymbols.delete(symbol)) {
+      scheduleSymbolEvaluation(symbol);
+    }
   }
 }
 
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
-  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
@@ -410,12 +461,14 @@ async function discoverSymbols() {
 
   for (const symbol of finalSymbols) {
     const instrument = instrumentBySymbol.get(symbol);
+
     await upsertSymbol(
       symbol,
       instrument?.base || symbol.replace(/USDT(\.P)?$/i, ''),
       instrument?.quote || 'USDT',
       'active'
     );
+
     symbols.add(symbol);
   }
 
@@ -515,6 +568,7 @@ async function sendRootSummary(roots, scanType) {
         root.reason
       );
     }
+
     return unseen;
   }
 
@@ -545,8 +599,7 @@ async function collectCurrentRoots(symbolList) {
 async function dispatchRoots(roots) {
   for (const root of roots) {
     try {
-      const evaluated = await evaluateSymbol(root.symbol);
-      if (!evaluated) continue;
+      await evaluateSymbol(root.symbol);
 
       if (config.TELEGRAM_SEND_DELAY_MS > 0) {
         await delay(config.TELEGRAM_SEND_DELAY_MS);
@@ -558,58 +611,47 @@ async function dispatchRoots(roots) {
 }
 
 async function runInitialScan(symbolList) {
-  batchScanRunning = true;
+  const roots = await collectCurrentRoots(symbolList);
 
-  try {
-    const roots = await collectCurrentRoots(symbolList);
-
-    await sendRootSummary(roots, 'startup');
-    await dispatchRoots(roots);
-  } finally {
-    batchScanRunning = false;
-  }
+  await sendRootSummary(roots, 'startup');
+  await dispatchRoots(roots);
 }
 
 async function runBoundaryScan() {
   if (boundaryScanRunning) return;
 
   boundaryScanRunning = true;
-  batchScanRunning = true;
 
   try {
     const roots = await collectCurrentRoots([...symbols]);
 
     await sendRootSummary(roots, 'boundary');
-
     await dispatchRoots(roots);
   } catch (error) {
     console.error('Boundary scan failed:', error);
   } finally {
-    batchScanRunning = false;
     boundaryScanRunning = false;
     await drainDeferredSymbols();
   }
 }
 
 async function drainDeferredSymbols() {
-  if (!startupReady || batchScanRunning || deferredSymbols.size === 0) return;
+  if (!startupReady || deferredSymbols.size === 0) return;
 
   const pending = [...deferredSymbols];
   deferredSymbols.clear();
 
   for (const symbol of pending) {
-    void processSymbol(symbol);
+    scheduleSymbolEvaluation(symbol);
   }
 }
 
 function nextWallClockBoundaryDelayMs() {
-  const interval = Math.max(
-    60000,
-    Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000)
-  );
+  const remainder = Date.now() % MTF_BOUNDARY_INTERVAL_MS;
 
-  const remainder = Date.now() % interval;
-  return remainder === 0 ? interval : interval - remainder;
+  return remainder === 0
+    ? MTF_BOUNDARY_INTERVAL_MS
+    : MTF_BOUNDARY_INTERVAL_MS - remainder;
 }
 
 function scheduleNextBoundary() {
@@ -634,9 +676,11 @@ async function performDailyCleanup() {
 
   try {
     await purgeStaleCache();
+
     if (typeof bybitWs.cleanupCache === 'function') {
       bybitWs.cleanupCache(interval);
     }
+
     lastCleanupAt = Date.now();
   } catch (error) {
     console.error('Daily cache cleanup failed:', error);
@@ -701,8 +745,6 @@ async function bootstrapStrategy() {
   bybitWs.on('kline', handleKline);
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
-
-  // Important: subscribe in a safe way; bybitWs now chunks to <=10 topics per request.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
@@ -714,11 +756,12 @@ async function bootstrapStrategy() {
 
   await replayBufferedKlines();
   await waitForWebSocketSnapshots(config.WS_INITIAL_SCAN_TIMEOUT);
-
   await performDailyCleanup();
-  await runInitialScan(symbolList);
 
+  // Live WS scans can run while startup root discovery is in progress.
   startupReady = true;
+
+  await runInitialScan(symbolList);
   await drainDeferredSymbols();
 
   const cleanupInterval = Number(
@@ -730,6 +773,7 @@ async function bootstrapStrategy() {
       () => void performDailyCleanup(),
       cleanupInterval
     );
+
     cleanupTimer.unref?.();
   }
 
