@@ -5,7 +5,11 @@ const { sma } = require('./ma');
 const { macdHistogram, detectBullishHistogramFlip } = require('./macd');
 const { calculateCustomRating } = require('./customRatingEngine');
 const { getTradingViewRating } = require('./tradingviewRating');
-const { checkLiquidity } = require('./liquidityGuard');
+const {
+  checkLiquidity,
+  getAccountEquity,
+  CONFIG: liquidityConfig
+} = require('./liquidityGuard');
 
 function getCurrentPrice(ticker, latestDailyCandle) {
   const tickerPrice = Number(ticker?.lastPrice || ticker?.last || 0);
@@ -90,13 +94,26 @@ async function evaluateSignal(
     '240': candlesByTf['240'] || []
   });
 
-  const liquidity = await checkLiquidity({
-    symbol,
-    lastPrice: currentPrice,
-    volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
-    spreadPct: Number(ticker?.spreadPct || 0),
-    topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
-  });
+  const { totalEquityUsd } = await getAccountEquity();
+
+  if (!Number.isFinite(totalEquityUsd) || totalEquityUsd <= 0) {
+    throw new Error('Live account equity is unavailable; refusing liquidity evaluation.');
+  }
+
+  const targetPositionUsd =
+    (totalEquityUsd * liquidityConfig.riskPercentage) /
+    liquidityConfig.stopLossPercentage;
+
+  const liquidity = checkLiquidity(
+    {
+      symbol,
+      lastPrice: currentPrice,
+      volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
+      spreadPct: Number(ticker?.spreadPct || 0),
+      topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
+    },
+    targetPositionUsd
+  );
 
   const customRating = calculateCustomRating({
     macdFlip: positiveFlip,
