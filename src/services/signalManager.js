@@ -11,6 +11,15 @@ const {
   CONFIG: liquidityConfig
 } = require('./liquidityGuard');
 
+function hasLiveAccountConfig() {
+  return Boolean(
+    config.BYBIT_API_KEY &&
+    config.BYBIT_API_SECRET &&
+    String(config.BYBIT_API_KEY).trim() &&
+    String(config.BYBIT_API_SECRET).trim()
+  );
+}
+
 function getCurrentPrice(ticker, latestDailyCandle) {
   const tickerPrice = Number(ticker?.lastPrice || ticker?.last || 0);
   if (tickerPrice > 0) return tickerPrice;
@@ -50,7 +59,7 @@ function detectDailyRootSignal(daily = [], ticker = {}) {
   };
 }
 
-async function evaluateSignal(
+async function buildMarketSignal(
   symbol,
   candlesByTf = {},
   ticker = {},
@@ -82,7 +91,6 @@ async function evaluateSignal(
 
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  // A root signal remains monitored for the rest of its daily candle.
   if (!rootActive && !openAndPriceAboveMa7 && !positiveFlip) {
     return null;
   }
@@ -93,6 +101,84 @@ async function evaluateSignal(
     '60': candlesByTf['60'] || [],
     '240': candlesByTf['240'] || []
   });
+
+  let reason = '1D root signal';
+  if (openAndPriceAboveMa7 && positiveFlip) {
+    reason = '1D open and current price above 7MA with positive hist flip';
+  } else if (openAndPriceAboveMa7) {
+    reason = '1D open and current price above 7MA';
+  } else if (positiveFlip) {
+    reason = '1D open-candle histogram flipped positive after prior closed candle was negative';
+  }
+
+  const previousState = await getMtfState(symbol, 'D');
+
+  const signal = {
+    symbol,
+    timeframe: 'D',
+    dailyCandleTime: Number(latestDailyCandle?.open_time || 0) || null,
+    decision: mtf.aligned ? 'accept' : 'monitor',
+    reason,
+
+    dailyHistogram: currentDailyHistogram,
+    dailyHistogramDirection,
+    macdFlip: positiveFlip,
+    openAboveMa7: openAndPriceAboveMa7,
+    priceAboveMa7: currentPrice > ma7,
+
+    customScore: 0,
+    customScoreLabel: 'Market-only',
+
+    tvScore: null,
+    tvScorePercent: null,
+    tvScoreLabel: 'Pending',
+    tvScoreAvailable: false,
+
+    mtfStatus: mtf.status,
+    mtfValues: mtf.values,
+    mtfPreviousValues: mtf.previousValues,
+    mtfHistogramValues: mtf.histogramValues,
+    mtfPreviousHistogramValues: mtf.previousHistogramValues,
+    mtfAligned: mtf.aligned,
+    mtfAlignmentFlip: mtf.alignmentFlip,
+    mtfFlippedBullish: mtf.flippedBullish,
+
+    status: mtf.aligned ? 'new' : 'monitor',
+    price: currentPrice,
+    liquidity: { valid: true },
+
+    mtfTransition:
+      previousState?.state && previousState.state !== mtf.status
+        ? `${previousState.state}->${mtf.status}`
+        : 'stable',
+
+    requiresLiveAccount: false
+  };
+
+  await setMtfState(symbol, 'D', mtf.status);
+
+  return signal;
+}
+
+async function evaluateSignal(
+  symbol,
+  candlesByTf = {},
+  ticker = {},
+  { rootActive = false } = {}
+) {
+  const marketSignal = await buildMarketSignal(symbol, candlesByTf, ticker, { rootActive });
+
+  if (!marketSignal) return null;
+
+  // DO NOT require account keys for the market-only signal.
+  if (!hasLiveAccountConfig()) {
+    await recordSignal(marketSignal);
+    return marketSignal;
+  }
+
+  const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
+  const latestDailyCandle = daily[daily.length - 1];
+  const currentPrice = getCurrentPrice(ticker, latestDailyCandle);
 
   const { totalEquityUsd } = await getAccountEquity();
 
@@ -116,79 +202,34 @@ async function evaluateSignal(
   );
 
   const customRating = calculateCustomRating({
-    macdFlip: positiveFlip,
-    openAboveMa7: openAndPriceAboveMa7,
-    mtfStatus: mtf.status,
+    macdFlip: marketSignal.macdFlip,
+    openAboveMa7: marketSignal.openAboveMa7,
+    mtfStatus: marketSignal.mtfStatus,
     liquidityValid: liquidity.valid,
-    marketTrend: mtf.aligned ? 'strong' : 'mixed',
+    marketTrend: marketSignal.mtfAligned ? 'strong' : 'mixed',
     priceBelow14Ma: false
   });
 
-  const previousState = await getMtfState(symbol, 'D');
-  const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
+  const decision = marketSignal.mtfAligned && liquidity.valid ? 'accept' : 'monitor';
 
-  let reason = '1D root signal';
-  if (openAndPriceAboveMa7 && positiveFlip) {
-    reason = '1D open and current price above 7MA with positive hist flip';
-  } else if (openAndPriceAboveMa7) {
-    reason = '1D open and current price above 7MA';
-  } else if (positiveFlip) {
-    reason = '1D open-candle histogram flipped positive after prior closed candle was negative';
-  }
+  marketSignal.decision = decision;
+  marketSignal.status = decision === 'accept' ? 'new' : 'monitor';
+  marketSignal.customScore = customRating.score;
+  marketSignal.customScoreLabel = customRating.label;
+  marketSignal.liquidity = liquidity;
+  marketSignal.requiresLiveAccount = true;
 
-  const signal = {
-    symbol,
-    timeframe: 'D',
-    dailyCandleTime: Number(latestDailyCandle?.open_time || 0) || null,
-    decision,
-    reason,
+  await recordSignal(marketSignal);
 
-    dailyHistogram: currentDailyHistogram,
-    dailyHistogramDirection,
-    macdFlip: positiveFlip,
-    openAboveMa7: openAndPriceAboveMa7,
-    priceAboveMa7: currentPrice > ma7,
-
-    customScore: customRating.score,
-    customScoreLabel: customRating.label,
-
-    // TV data is optional and should not block the MTF alert.
-    tvScore: null,
-    tvScorePercent: null,
-    tvScoreLabel: 'Pending',
-    tvScoreAvailable: false,
-
-    mtfStatus: mtf.status,
-    mtfValues: mtf.values,
-    mtfPreviousValues: mtf.previousValues,
-    mtfHistogramValues: mtf.histogramValues,
-    mtfPreviousHistogramValues: mtf.previousHistogramValues,
-    mtfAligned: mtf.aligned,
-    mtfAlignmentFlip: mtf.alignmentFlip,
-    mtfFlippedBullish: mtf.flippedBullish,
-
-    status: decision === 'accept' ? 'new' : 'monitor',
-    price: currentPrice,
-    liquidity,
-
-    mtfTransition:
-      previousState?.state && previousState.state !== mtf.status
-        ? `${previousState.state}->${mtf.status}`
-        : 'stable'
-  };
-
-  await setMtfState(symbol, 'D', mtf.status);
-  await recordSignal(signal);
-
-  // Do not delay the signal while the TV rating request resolves.
+  // TV data is optional and should not block the MTF alert.
   void getTradingViewRating(symbol)
     .then(async (tvRating) => {
-      signal.tvScore = tvRating.available ? tvRating.score : null;
-      signal.tvScorePercent = tvRating.available ? tvRating.percent : null;
-      signal.tvScoreLabel = tvRating.label;
-      signal.tvScoreAvailable = tvRating.available;
+      marketSignal.tvScore = tvRating.available ? tvRating.score : null;
+      marketSignal.tvScorePercent = tvRating.available ? tvRating.percent : null;
+      marketSignal.tvScoreLabel = tvRating.label;
+      marketSignal.tvScoreAvailable = tvRating.available;
 
-      await recordSignal(signal);
+      await recordSignal(marketSignal);
     })
     .catch((error) => {
       console.error(
@@ -197,7 +238,7 @@ async function evaluateSignal(
       );
     });
 
-  return signal;
+  return marketSignal;
 }
 
 module.exports = {
