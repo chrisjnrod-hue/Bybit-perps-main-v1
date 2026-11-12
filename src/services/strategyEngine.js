@@ -1,3 +1,4 @@
+// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -18,6 +19,7 @@ const {
   evaluateSignal,
   detectDailyRootSignal
 } = require('./signalManager');
+const { macdHistogram } = require('./macd');
 const {
   shouldOpenTrade,
   rankTradeCandidates,
@@ -38,7 +40,6 @@ const { setupKeepAlive } = require('./keepalive');
 
 const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
 const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
-const MTF_BOUNDARY_INTERVAL_MS = 5 * 60 * 1000;
 
 const ROOT_SUMMARY_PREFIX = 'root-summary';
 const ALIGNMENT_PREFIX = 'mtf-alignment';
@@ -51,6 +52,7 @@ const TRADE_RANKING_WINDOW_MS = 1000;
 let bootstrapped = false;
 let startupReady = false;
 let seedingHistory = false;
+let batchScanRunning = false;
 let boundaryScanRunning = false;
 let cleanupRunning = false;
 let lastCleanupAt = 0;
@@ -62,11 +64,11 @@ const pendingEvaluations = new Map();
 const deferredSymbols = new Set();
 const bufferedKlines = new Map();
 const tradeCandidates = new Map();
-const evaluatingSymbols = new Set();
 
-// A discovered root remains eligible for MTF monitoring for the rest of its
-// daily candle, even if its original root condition later stops being true.
+// A root remains monitored for the rest of its daily candle. This state is
+// in memory; it is reset when a new daily candle begins or the process restarts.
 const monitoredRoots = new Map();
+const evaluatingSymbols = new Set();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -126,12 +128,20 @@ async function getDailyRoot(symbol) {
     lastPrice: marketData.lastPrice
   });
 
+  const previousMonitor = monitoredRoots.get(symbol);
+  const sameDailyCandle =
+    previousMonitor?.dailyCandleTime === dailyCandleTime;
+
   if (detectedRoot) {
     const root = { ...detectedRoot, symbol };
 
     monitoredRoots.set(symbol, {
       dailyCandleTime,
-      root
+      root,
+      signal: sameDailyCandle ? previousMonitor.signal : null,
+      initialAlignmentCheckPending: sameDailyCandle
+        ? previousMonitor.initialAlignmentCheckPending
+        : true
     });
 
     return {
@@ -142,12 +152,11 @@ async function getDailyRoot(symbol) {
     };
   }
 
-  const monitored = monitoredRoots.get(symbol);
-
-  // A root only remains active for the daily candle on which it was found.
-  if (monitored && monitored.dailyCandleTime === dailyCandleTime) {
+  // Keep monitoring a root already discovered during this daily candle,
+  // even if its original detection condition no longer passes.
+  if (sameDailyCandle) {
     return {
-      root: monitored.root,
+      root: previousMonitor.root,
       dailyCandles,
       marketData,
       rootActive: true
@@ -158,11 +167,84 @@ async function getDailyRoot(symbol) {
   return null;
 }
 
+function getMtfSnapshot(candlesByTf) {
+  const values = {};
+  const histogramValues = {};
+  const previousHistogramValues = {};
+  const flippedBullish = [];
+
+  for (const timeframe of MTF_TIMEFRAMES) {
+    const candles = Array.isArray(candlesByTf[timeframe])
+      ? candlesByTf[timeframe]
+      : [];
+
+    const currentHistogram = candles.length >= 26
+      ? Number(macdHistogram(candles))
+      : null;
+
+    // The final stored candle is treated as the currently forming candle.
+    // Recalculate without it to get the previous candle's closed histogram.
+    const previousHistogram = candles.length >= 27
+      ? Number(macdHistogram(candles.slice(0, -1)))
+      : null;
+
+    histogramValues[timeframe] = currentHistogram;
+    previousHistogramValues[timeframe] = previousHistogram;
+
+    if (currentHistogram === null || !Number.isFinite(currentHistogram)) {
+      values[timeframe] = 'neutral';
+    } else if (currentHistogram > 0) {
+      values[timeframe] = 'bullish';
+    } else if (currentHistogram < 0) {
+      values[timeframe] = 'negative';
+    } else {
+      values[timeframe] = 'neutral';
+    }
+
+    if (
+      previousHistogram !== null &&
+      Number.isFinite(previousHistogram) &&
+      previousHistogram < 0 &&
+      currentHistogram !== null &&
+      Number.isFinite(currentHistogram) &&
+      currentHistogram > 0
+    ) {
+      flippedBullish.push(timeframe);
+    }
+  }
+
+  const aligned = MTF_TIMEFRAMES.every(
+    (timeframe) => values[timeframe] === 'bullish'
+  );
+
+  let status = 'mixed';
+  if (aligned) {
+    status = 'bullish';
+  } else if (
+    MTF_TIMEFRAMES.every((timeframe) => values[timeframe] === 'negative')
+  ) {
+    status = 'negative';
+  } else if (
+    MTF_TIMEFRAMES.every((timeframe) => values[timeframe] === 'neutral')
+  ) {
+    status = 'neutral';
+  }
+
+  return {
+    status,
+    values,
+    histogramValues,
+    previousHistogramValues,
+    aligned,
+    flippedBullish
+  };
+}
+
 function alertData(signal, marketData) {
   return {
     symbol: signal.symbol,
     time: new Date().toISOString(),
-    decision: signal.decision,
+    decision: signal.decision || 'monitor',
     reason: signal.reason,
     customScore: signal.customScore,
     customScoreLabel: signal.customScoreLabel,
@@ -183,8 +265,8 @@ function alertData(signal, marketData) {
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  // All required MTFs must be bullish. Trade acceptance/liquidity is a
-  // separate decision and must not suppress the alignment alert.
+  // The alert reports MTF alignment; it is not gated by trade acceptance
+  // or liquidity. All configured MTF timeframes must be bullish.
   if (signal?.mtfAligned !== true) {
     return false;
   }
@@ -292,33 +374,118 @@ async function flushTradeCandidateQueue() {
   }
 }
 
+function buildAlignmentSignal(root, baseSignal, snapshot, marketData) {
+  const dailyCandleTime =
+    Number(baseSignal?.dailyCandleTime || root?.dailyCandleTime || 0) || null;
+
+  return {
+    ...(baseSignal || {}),
+    symbol: root.symbol,
+    timeframe: 'D',
+    dailyCandleTime,
+    decision: baseSignal?.decision || 'monitor',
+    reason: baseSignal?.reason || root.reason || '1D root signal',
+    mtfStatus: snapshot.status,
+    mtfValues: snapshot.values,
+    mtfHistogramValues: snapshot.histogramValues,
+    mtfPreviousHistogramValues: snapshot.previousHistogramValues,
+    mtfAligned: snapshot.aligned,
+    mtfFlippedBullish: snapshot.flippedBullish,
+    price: Number(marketData.lastPrice || baseSignal?.price || 0)
+  };
+}
+
 async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
   const daily = await getDailyRoot(symbol);
   if (!daily) return null;
 
-  const mtfEntries = await Promise.all(
-    MTF_TIMEFRAMES.map(async (timeframe) => [
-      timeframe,
-      await getCandles(symbol, timeframe)
-    ])
+  const monitor = monitoredRoots.get(symbol);
+  if (!monitor) return null;
+
+  const mtfCandles = {};
+  for (const timeframe of MTF_TIMEFRAMES) {
+    mtfCandles[timeframe] = await getCandles(symbol, timeframe);
+  }
+
+  const snapshot = getMtfSnapshot(mtfCandles);
+  const initialAlignmentCheckPending =
+    monitor.initialAlignmentCheckPending === true;
+
+  // If the root was discovered already aligned, alert on this first check.
+  // Otherwise, wait until all MTFs are positive and a lagging TF flips from
+  // negative on its previous closed candle to positive on its current candle.
+  const alignmentTrigger =
+    snapshot.aligned &&
+    (
+      initialAlignmentCheckPending ||
+      snapshot.flippedBullish.length > 0
+    );
+
+  monitor.initialAlignmentCheckPending = false;
+
+  let signal = monitor.signal;
+
+  // Preserve the existing signal evaluation and trade flow. Run it in the
+  // background so its TradingView request cannot hold up an MTF alert.
+  if (!signal && !monitor.signalEvaluationStarted) {
+    monitor.signalEvaluationStarted = true;
+
+    void evaluateSignal(
+      symbol,
+      { ...mtfCandles, D: daily.dailyCandles },
+      daily.marketData
+    )
+      .then(async (evaluatedSignal) => {
+        if (!evaluatedSignal) return;
+
+        const currentMonitor = monitoredRoots.get(symbol);
+        if (
+          !currentMonitor ||
+          currentMonitor.dailyCandleTime !== monitor.dailyCandleTime
+        ) {
+          return;
+        }
+
+        currentMonitor.signal = evaluatedSignal;
+        await recordSignal(evaluatedSignal);
+
+        if (sendAlerts) {
+          queueTradeCandidate(evaluatedSignal, daily.marketData);
+        }
+      })
+      .catch((error) => {
+        console.error(`Signal evaluation failed for ${symbol}:`, error);
+      });
+  }
+
+  signal = buildAlignmentSignal(
+    daily.root,
+    signal,
+    snapshot,
+    daily.marketData
   );
 
-  const mtfCandles = Object.fromEntries(mtfEntries);
-
-  const signal = await evaluateSignal(
-    symbol,
-    { ...mtfCandles, D: daily.dailyCandles },
-    daily.marketData,
-    { rootActive: daily.rootActive }
-  );
-
-  if (!signal) return null;
-
-  await recordSignal(signal);
-
-  if (sendAlerts) {
+  if (sendAlerts && alignmentTrigger) {
     await maybeSendAlignmentAlert(signal, daily.marketData);
-    queueTradeCandidate(signal, daily.marketData);
+  }
+
+  if (monitor.signal) {
+    const updatedSignal = {
+      ...monitor.signal,
+      mtfStatus: snapshot.status,
+      mtfValues: snapshot.values,
+      mtfHistogramValues: snapshot.histogramValues,
+      mtfPreviousHistogramValues: snapshot.previousHistogramValues,
+      mtfAligned: snapshot.aligned,
+      mtfFlippedBullish: snapshot.flippedBullish
+    };
+
+    monitor.signal = updatedSignal;
+    await recordSignal(updatedSignal);
+
+    if (sendAlerts && snapshot.aligned) {
+      queueTradeCandidate(updatedSignal, daily.marketData);
+    }
   }
 
   return {
@@ -405,6 +572,9 @@ async function processSymbol(symbol) {
     return;
   }
 
+  // Do not defer WebSocket updates just because a whole-market scan is running.
+  // Serialize evaluations for the same symbol and rerun if another update
+  // arrived while the current evaluation was in progress.
   if (evaluatingSymbols.has(symbol)) {
     deferredSymbols.add(symbol);
     return;
@@ -428,6 +598,7 @@ async function processSymbol(symbol) {
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
+  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
@@ -611,16 +782,23 @@ async function dispatchRoots(roots) {
 }
 
 async function runInitialScan(symbolList) {
-  const roots = await collectCurrentRoots(symbolList);
+  batchScanRunning = true;
 
-  await sendRootSummary(roots, 'startup');
-  await dispatchRoots(roots);
+  try {
+    const roots = await collectCurrentRoots(symbolList);
+
+    await sendRootSummary(roots, 'startup');
+    await dispatchRoots(roots);
+  } finally {
+    batchScanRunning = false;
+  }
 }
 
 async function runBoundaryScan() {
   if (boundaryScanRunning) return;
 
   boundaryScanRunning = true;
+  batchScanRunning = true;
 
   try {
     const roots = await collectCurrentRoots([...symbols]);
@@ -630,6 +808,7 @@ async function runBoundaryScan() {
   } catch (error) {
     console.error('Boundary scan failed:', error);
   } finally {
+    batchScanRunning = false;
     boundaryScanRunning = false;
     await drainDeferredSymbols();
   }
@@ -647,11 +826,13 @@ async function drainDeferredSymbols() {
 }
 
 function nextWallClockBoundaryDelayMs() {
-  const remainder = Date.now() % MTF_BOUNDARY_INTERVAL_MS;
+  const interval = Math.max(
+    60000,
+    Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000)
+  );
 
-  return remainder === 0
-    ? MTF_BOUNDARY_INTERVAL_MS
-    : MTF_BOUNDARY_INTERVAL_MS - remainder;
+  const remainder = Date.now() % interval;
+  return remainder === 0 ? interval : interval - remainder;
 }
 
 function scheduleNextBoundary() {
@@ -745,6 +926,8 @@ async function bootstrapStrategy() {
   bybitWs.on('kline', handleKline);
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
+
+  // Keep the existing WebSocket subscription behavior.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
@@ -758,7 +941,7 @@ async function bootstrapStrategy() {
   await waitForWebSocketSnapshots(config.WS_INITIAL_SCAN_TIMEOUT);
   await performDailyCleanup();
 
-  // Live WS scans can run while startup root discovery is in progress.
+  // Enable live evaluations before the whole-market startup scan completes.
   startupReady = true;
 
   await runInitialScan(symbolList);
