@@ -46,7 +46,12 @@ function detectDailyRootSignal(daily = [], ticker = {}) {
   };
 }
 
-async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
+async function evaluateSignal(
+  symbol,
+  candlesByTf = {},
+  ticker = {},
+  { rootActive = false } = {}
+) {
   const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
   if (daily.length < 8) return null;
 
@@ -72,9 +77,13 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
         : 'neutral';
 
   const positiveFlip = detectBullishHistogramFlip(daily);
-  if (!openAndPriceAboveMa7 && !positiveFlip) return null;
 
-  // MTF is evaluated only after the daily root criteria pass.
+  // Once a daily root has been discovered, the strategy engine can keep
+  // monitoring it until this daily candle expires.
+  if (!rootActive && !openAndPriceAboveMa7 && !positiveFlip) {
+    return null;
+  }
+
   const mtf = evaluateMtfAlignment({
     '5': candlesByTf['5'] || [],
     '15': candlesByTf['15'] || [],
@@ -101,10 +110,7 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     priceBelow14Ma: false
   });
 
-  // Rating retrieval must not fabricate a zero when the service fails.
-  const tvRating = await getTradingViewRating(symbol);
   const previousState = await getMtfState(symbol, 'D');
-
   const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
 
   let reason = '1D root signal';
@@ -132,15 +138,23 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     customScore: customRating.score,
     customScoreLabel: customRating.label,
 
-    // Native TradingView rating: -1 to +1.
-    tvScore: tvRating.available ? tvRating.score : null,
-    tvScorePercent: tvRating.available ? tvRating.percent : null,
-    tvScoreLabel: tvRating.label,
-    tvScoreAvailable: tvRating.available,
+    // The TV lookup runs in the background so it cannot delay the MTF alert.
+    // Configure a supported rating provider endpoint to populate these fields.
+    customRating,
+    tvScore: null,
+    tvScorePercent: null,
+    tvScoreLabel: 'Pending',
+    tvScoreAvailable: false,
 
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
+    mtfPreviousValues: mtf.previousValues,
+    mtfHistogramValues: mtf.histogramValues,
+    mtfPreviousHistogramValues: mtf.previousHistogramValues,
     mtfAligned: mtf.aligned,
+    mtfAlignmentFlip: mtf.alignmentFlip,
+    mtfFlippedBullish: mtf.flippedBullish,
+
     status: decision === 'accept' ? 'new' : 'monitor',
     price: currentPrice,
     liquidity,
@@ -153,6 +167,23 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 
   await setMtfState(symbol, 'D', mtf.status);
   await recordSignal(signal);
+
+  // Start the optional TV lookup without waiting for its network response.
+  void getTradingViewRating(symbol)
+    .then(async (tvRating) => {
+      signal.tvScore = tvRating.available ? tvRating.score : null;
+      signal.tvScorePercent = tvRating.available ? tvRating.percent : null;
+      signal.tvScoreLabel = tvRating.label;
+      signal.tvScoreAvailable = tvRating.available;
+
+      await recordSignal(signal);
+    })
+    .catch((error) => {
+      console.error(
+        `[signalManager] TradingView rating update failed for ${symbol}:`,
+        error.message
+      );
+    });
 
   return signal;
 }
