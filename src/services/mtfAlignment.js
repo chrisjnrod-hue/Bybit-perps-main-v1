@@ -7,53 +7,79 @@ function histogramDirection(candles) {
     return 'neutral';
   }
 
-  const value = Number(macdHistogram(candles));
+  const histogram = Number(macdHistogram(candles));
 
-  if (!Number.isFinite(value)) return 'neutral';
-  if (value > 0) return 'bullish';
-  if (value < 0) return 'negative';
+  if (!Number.isFinite(histogram)) return 'neutral';
+  if (histogram > 0) return 'bullish';
+  if (histogram < 0) return 'negative';
   return 'neutral';
 }
 
 function evaluateMtfAlignment(candlesByTf = {}) {
   const values = {};
   const previousValues = {};
+  const histogramValues = {};
+  const previousHistogramValues = {};
   const flippedBullish = [];
 
-  for (const tf of REQUIRED_MTF_TFS) {
-    const candles = Array.isArray(candlesByTf[tf])
-      ? candlesByTf[tf]
+  for (const timeframe of REQUIRED_MTF_TFS) {
+    const candles = Array.isArray(candlesByTf[timeframe])
+      ? candlesByTf[timeframe]
       : [];
 
-    const currentDirection = histogramDirection(candles);
+    const currentHistogram = candles.length >= 26
+      ? Number(macdHistogram(candles))
+      : null;
 
-    // Exclude the current, forming candle to get the previous candle's
-    // histogram direction.
-    const previousDirection = candles.length > 1
-      ? histogramDirection(candles.slice(0, -1))
-      : 'neutral';
+    // The final candle is the currently forming candle. Excluding it lets us
+    // compare its live histogram against the previous candle's closed value.
+    const previousHistogram = candles.length >= 27
+      ? Number(macdHistogram(candles.slice(0, -1)))
+      : null;
 
-    values[tf] = currentDirection;
-    previousValues[tf] = previousDirection;
+    const currentDirection = currentHistogram === null
+      ? 'neutral'
+      : currentHistogram > 0
+        ? 'bullish'
+        : currentHistogram < 0
+          ? 'negative'
+          : 'neutral';
 
+    const previousDirection = previousHistogram === null
+      ? 'neutral'
+      : previousHistogram > 0
+        ? 'bullish'
+        : previousHistogram < 0
+          ? 'negative'
+          : 'neutral';
+
+    values[timeframe] = currentDirection;
+    previousValues[timeframe] = previousDirection;
+    histogramValues[timeframe] = currentHistogram;
+    previousHistogramValues[timeframe] = previousHistogram;
+
+    // The requested flip is negative on the previous candle and positive on
+    // the currently forming candle.
     if (
-      currentDirection === 'bullish' &&
-      previousDirection === 'negative'
+      previousHistogram !== null &&
+      previousHistogram < 0 &&
+      currentHistogram !== null &&
+      currentHistogram > 0
     ) {
-      flippedBullish.push(tf);
+      flippedBullish.push(timeframe);
     }
   }
 
   const bullishCount = REQUIRED_MTF_TFS.filter(
-    (tf) => values[tf] === 'bullish'
+    (timeframe) => values[timeframe] === 'bullish'
   ).length;
 
   const negativeCount = REQUIRED_MTF_TFS.filter(
-    (tf) => values[tf] === 'negative'
+    (timeframe) => values[timeframe] === 'negative'
   ).length;
 
   const neutralCount = REQUIRED_MTF_TFS.filter(
-    (tf) => values[tf] === 'neutral'
+    (timeframe) => values[timeframe] === 'neutral'
   ).length;
 
   const aligned = bullishCount === REQUIRED_MTF_TFS.length;
@@ -67,7 +93,11 @@ function evaluateMtfAlignment(candlesByTf = {}) {
     status,
     values,
     previousValues,
+    histogramValues,
+    previousHistogramValues,
     aligned,
+    // This identifies a current-candle negative-to-positive flip. The alert
+    // still requires every required timeframe to be bullish.
     alignmentFlip: aligned && flippedBullish.length > 0,
     flippedBullish,
     bullish: bullishCount,
