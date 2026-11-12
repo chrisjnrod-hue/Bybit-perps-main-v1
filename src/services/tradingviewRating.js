@@ -20,6 +20,7 @@ function isEnabled(value) {
 
 async function getTradingViewRating(symbol) {
   const cleanSymbol = String(symbol || '').trim().toUpperCase();
+  // Ensure proper TradingView formatting (e.g. BINANCE:BTCUSDT)
   const tvSymbol = cleanSymbol.includes(':') ? cleanSymbol : `BINANCE:${cleanSymbol}`;
 
   if (!cleanSymbol) {
@@ -55,21 +56,34 @@ async function getTradingViewRating(symbol) {
     const tvModule = await import('@mathieuc/tradingview/data');
     const getTechnicalAnalysis = tvModule.getTechnicalAnalysis;
 
+    // Pass interval and explicit screener options if supported by the package version
     const analysis = await getTechnicalAnalysis({
+      symbol: tvSymbol,
+      interval: interval,
+      screener: 'crypto',
+      exchange: 'BINANCE'
+    }).catch(() => null) ?? await getTechnicalAnalysis({
       symbol: tvSymbol,
       interval: interval
     });
 
-    // Debug log to inspect raw wrapper output in Render logs if needed
-    console.log(`[tradingviewRating] Raw analysis for ${tvSymbol}:`, JSON.stringify(analysis));
+    if (!analysis) {
+      return {
+        available: false,
+        score: null,
+        percent: null,
+        label: 'N/A',
+        source: 'TradingView'
+      };
+    }
 
-    // Extract recommendation across various possible structures
     const rawRecommendation = 
       analysis?.recommendation?.value ?? 
       analysis?.summary?.RECOMMENDATION ?? 
       analysis?.RECOMMENDATION ??
       analysis?.compute?.RECOMMENDATION ??
-      analysis?.value;
+      analysis?.value ??
+      analysis?.indicators?.['Recommend.All'];
     
     let score = null;
     if (typeof rawRecommendation === 'number') {
