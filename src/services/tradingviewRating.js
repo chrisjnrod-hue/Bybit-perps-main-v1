@@ -52,7 +52,6 @@ async function getTradingViewRating(symbol) {
   try {
     const interval = String(config.TRADINGVIEW_RATING_INTERVAL || '1D');
     
-    // Dynamically import the ES Module to bypass CommonJS require restrictions
     const tvModule = await import('@mathieuc/tradingview/data');
     const getTechnicalAnalysis = tvModule.getTechnicalAnalysis;
 
@@ -61,7 +60,16 @@ async function getTradingViewRating(symbol) {
       interval: interval
     });
 
-    const rawRecommendation = analysis?.recommendation?.value ?? analysis?.summary?.RECOMMENDATION;
+    // Debug log to inspect raw wrapper output in Render logs if needed
+    console.log(`[tradingviewRating] Raw analysis for ${tvSymbol}:`, JSON.stringify(analysis));
+
+    // Extract recommendation across various possible structures
+    const rawRecommendation = 
+      analysis?.recommendation?.value ?? 
+      analysis?.summary?.RECOMMENDATION ?? 
+      analysis?.RECOMMENDATION ??
+      analysis?.compute?.RECOMMENDATION ??
+      analysis?.value;
     
     let score = null;
     if (typeof rawRecommendation === 'number') {
@@ -100,7 +108,7 @@ async function getTradingViewRating(symbol) {
 
     return rating;
   } catch (error) {
-    console.error(`[tradingviewRating] Dynamic import/wrapper request failed for ${cleanSymbol}:`, error.message);
+    console.error(`[tradingviewRating] Request failed for ${cleanSymbol}:`, error.message);
 
     return {
       available: false,
