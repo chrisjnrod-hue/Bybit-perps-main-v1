@@ -119,24 +119,8 @@ async function getAccountEquity(accountType = CONFIG.accountType) {
 }
 
 /**
- * Helper: convert old/new liquidity call patterns into a target-notional USD.
- */
-function resolveTargetPositionUsd(valueA, valueB) {
-  const a = Number(valueA || 0);
-  const b = Number(valueB || 0);
-
-  // supports:
-  // checkLiquidity(symbolInfo, targetPositionUsd)
-  // checkLiquidity(symbolInfo, accountEquityUsd, targetPositionFrac)
-  if (arguments.length >= 3 && b > 0) {
-    return a * b;
-  }
-
-  return a;
-}
-
-/**
  * 2. Level-1 Quick Check (Used by the market-wide scanner)
+ * Uses a direct notional threshold in USD.
  */
 function checkLiquidity(symbolInfo = {}, targetPositionUsd = 0) {
   const volume24hUsd = Number(symbolInfo.volume24hUsd || 0);
@@ -165,7 +149,10 @@ function checkLiquidity(symbolInfo = {}, targetPositionUsd = 0) {
 /**
  * 3. Market-Wide Scanner: Fetches live equity once and screens all USDT pairs
  */
-async function scanLiquidSymbols(category = CONFIG.category, preFetchedEquityUsd = null) {
+async function scanLiquidSymbols(
+  category = CONFIG.category,
+  preFetchedEquityUsd = null
+) {
   const equityUsd =
     preFetchedEquityUsd ?? (await getAccountEquity()).totalEquityUsd;
 
@@ -230,7 +217,6 @@ async function scanLiquidSymbols(category = CONFIG.category, preFetchedEquityUsd
       topOfBookDepthUsd
     };
 
-    // Use the dynamic equity-based liquidity threshold
     const status = checkLiquidity(symbolInfo, targetPositionUsd);
 
     if (status.valid) {
@@ -242,7 +228,6 @@ async function scanLiquidSymbols(category = CONFIG.category, preFetchedEquityUsd
     }
   }
 
-  // Sort most liquid pairs first by 24h volume
   liquidSymbols.sort((a, b) => b.volume24hUsd - a.volume24hUsd);
 
   return {
@@ -255,7 +240,11 @@ async function scanLiquidSymbols(category = CONFIG.category, preFetchedEquityUsd
 /**
  * 4. Deep 50-Level Order Book Analyzer (Used right before trade execution)
  */
-async function analyzeOrderBook(symbol, side = 'Buy', thresholdPct = CONFIG.depthBandPct) {
+async function analyzeOrderBook(
+  symbol,
+  side = 'Buy',
+  thresholdPct = CONFIG.depthBandPct
+) {
   const endpoint = `/v5/market/orderbook?category=${CONFIG.category}&symbol=${symbol}&limit=50`;
   const response = await fetch(`${CONFIG.baseUrl}${endpoint}`);
 
