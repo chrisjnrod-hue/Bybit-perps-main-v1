@@ -78,8 +78,7 @@ async function evaluateSignal(
 
   const positiveFlip = detectBullishHistogramFlip(daily);
 
-  // Once a daily root has been discovered, the strategy engine can keep
-  // monitoring it until this daily candle expires.
+  // A root signal remains monitored for the rest of its daily candle.
   if (!rootActive && !openAndPriceAboveMa7 && !positiveFlip) {
     return null;
   }
@@ -91,15 +90,13 @@ async function evaluateSignal(
     '240': candlesByTf['240'] || []
   });
 
-  const liquidity = checkLiquidity(
-    {
-      volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
-      spreadPct: Number(ticker?.spreadPct || 0),
-      topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
-    },
-    Number(config.DEFAULT_ACCOUNT_EQUITY_USD || 10000),
-    Number(config.TARGET_POSITION_FRAC || 0.01)
-  );
+  const liquidity = await checkLiquidity({
+    symbol,
+    lastPrice: currentPrice,
+    volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
+    spreadPct: Number(ticker?.spreadPct || 0),
+    topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
+  });
 
   const customRating = calculateCustomRating({
     macdFlip: positiveFlip,
@@ -138,9 +135,7 @@ async function evaluateSignal(
     customScore: customRating.score,
     customScoreLabel: customRating.label,
 
-    // The TV lookup runs in the background so it cannot delay the MTF alert.
-    // Configure a supported rating provider endpoint to populate these fields.
-    customRating,
+    // TV data is optional and should not block the MTF alert.
     tvScore: null,
     tvScorePercent: null,
     tvScoreLabel: 'Pending',
@@ -168,7 +163,7 @@ async function evaluateSignal(
   await setMtfState(symbol, 'D', mtf.status);
   await recordSignal(signal);
 
-  // Start the optional TV lookup without waiting for its network response.
+  // Do not delay the signal while the TV rating request resolves.
   void getTradingViewRating(symbol)
     .then(async (tvRating) => {
       signal.tvScore = tvRating.available ? tvRating.score : null;
