@@ -1,4 +1,3 @@
-// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -66,6 +65,15 @@ const tradeCandidates = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasLiveAccountConfig() {
+  return Boolean(
+    config.BYBIT_API_KEY &&
+    config.BYBIT_API_SECRET &&
+    String(config.BYBIT_API_KEY).trim() &&
+    String(config.BYBIT_API_SECRET).trim()
+  );
 }
 
 function dailySignalKey(signal) {
@@ -309,7 +317,10 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
 
   if (sendAlerts) {
     await maybeSendAlignmentAlert(signal, daily.marketData);
-    queueTradeCandidate(signal, daily.marketData);
+
+    if (hasLiveAccountConfig()) {
+      queueTradeCandidate(signal, daily.marketData);
+    }
   }
 
   return {
@@ -406,7 +417,6 @@ async function processSymbol(symbol) {
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
-  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
@@ -610,7 +620,6 @@ async function runBoundaryScan() {
     const roots = await collectCurrentRoots([...symbols]);
 
     await sendRootSummary(roots, 'boundary');
-
     await dispatchRoots(roots);
   } catch (error) {
     console.error('Boundary scan failed:', error);
@@ -732,7 +741,6 @@ async function bootstrapStrategy() {
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
 
-  // Important: subscribe in a safe way; bybitWs now chunks to <=10 topics per request.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
