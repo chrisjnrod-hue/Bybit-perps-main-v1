@@ -138,20 +138,12 @@ function resolveTargetPositionUsd(valueA, valueB) {
 /**
  * 2. Level-1 Quick Check (Used by the market-wide scanner)
  */
-function checkLiquidity(
-  symbolInfo = {},
-  accountEquityUsd = 10000,
-  targetPositionFrac = 0.01
-) {
+function checkLiquidity(symbolInfo = {}, targetPositionUsd = 0) {
   const volume24hUsd = Number(symbolInfo.volume24hUsd || 0);
   const spreadPct = Number(symbolInfo.spreadPct || 0);
   const topOfBookDepthUsd = Number(symbolInfo.topOfBookDepthUsd || 0);
-  const targetPositionUsd = resolveTargetPositionUsd(
-    accountEquityUsd,
-    targetPositionFrac
-  );
 
-  if (targetPositionUsd <= 0) {
+  if (!Number.isFinite(targetPositionUsd) || targetPositionUsd <= 0) {
     return { valid: false, reason: 'invalid_target_position' };
   }
 
