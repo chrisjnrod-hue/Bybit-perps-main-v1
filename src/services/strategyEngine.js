@@ -168,9 +168,10 @@ function alertData(signal, marketData) {
 }
 
 function isFinalBullishMtfFlip(signal) {
-  const current = signal?.mtfValues || {};
-  const previous = signal?.mtfPreviousValues || {};
+  if (!signal) return false;
 
+  // immediate alert case: all required MTFs are already bullish
+  const current = signal?.mtfValues || {};
   const required = ['5', '15', '60', '240'];
 
   const allCurrentBullish = required.every((tf) => {
@@ -185,6 +186,8 @@ function isFinalBullishMtfFlip(signal) {
 
   if (allCurrentBullish) return true;
 
+  // delayed alert case:
+  // previous closed histogram negative, current histogram positive
   const latestFlipTf =
     signal?.latestFlippedBullishTimeframe ||
     signal?.mtfLatestFlippedBullish ||
@@ -192,8 +195,8 @@ function isFinalBullishMtfFlip(signal) {
 
   if (!latestFlipTf) return false;
 
+  const prev = signal?.mtfPreviousValues?.[latestFlipTf];
   const now = current[latestFlipTf];
-  const prev = previous[latestFlipTf];
 
   const nowBullish =
     now === true ||
@@ -218,7 +221,9 @@ async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = fals
     signal?.mtfAligned === true &&
     signal?.mtfStatus === 'bullish';
 
-  const finalFlipAlert = signal?.mtfAlignmentFlip === true || isFinalBullishMtfFlip(signal);
+  const finalFlipAlert =
+    signal?.mtfAlignmentFlip === true ||
+    isFinalBullishMtfFlip(signal);
 
   if (!immediateAlert && !finalFlipAlert) {
     return false;
