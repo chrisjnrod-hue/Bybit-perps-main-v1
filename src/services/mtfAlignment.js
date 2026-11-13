@@ -2,18 +2,6 @@ const { macdHistogram } = require('./macd');
 
 const REQUIRED_MTF_TFS = ['5', '15', '60', '240'];
 
-function histogramDirection(candles) {
-  if (!Array.isArray(candles) || candles.length < 26) {
-    return 'neutral';
-  }
-
-  const histogram = Number(macdHistogram(candles));
-  if (!Number.isFinite(histogram)) return 'neutral';
-  if (histogram > 0) return 'bullish';
-  if (histogram < 0) return 'negative';
-  return 'neutral';
-}
-
 function getHistogram(candles) {
   if (!Array.isArray(candles) || candles.length < 26) {
     return null;
@@ -30,6 +18,13 @@ function getLastCandleTime(candles) {
   return Number.isFinite(time) && time > 0 ? time : null;
 }
 
+function directionFromHistogram(histogram) {
+  if (histogram === null) return 'neutral';
+  if (histogram > 0) return 'bullish';
+  if (histogram < 0) return 'negative';
+  return 'neutral';
+}
+
 function evaluateMtfAlignment(candlesByTf = {}) {
   const values = {};
   const previousValues = {};
@@ -44,33 +39,21 @@ function evaluateMtfAlignment(candlesByTf = {}) {
       : [];
 
     const currentHistogram = getHistogram(candles);
-
-    // compare current live candle against the last closed candle
     const previousHistogram = candles.length >= 27
       ? getHistogram(candles.slice(0, -1))
       : null;
 
-    const currentDirection = currentHistogram === null
-      ? 'neutral'
-      : currentHistogram > 0
-        ? 'bullish'
-        : currentHistogram < 0
-          ? 'negative'
-          : 'neutral';
-
-    const previousDirection = previousHistogram === null
-      ? 'neutral'
-      : previousHistogram > 0
-        ? 'bullish'
-        : previousHistogram < 0
-          ? 'negative'
-          : 'neutral';
+    const currentDirection = directionFromHistogram(currentHistogram);
+    const previousDirection = directionFromHistogram(previousHistogram);
 
     values[timeframe] = currentDirection;
     previousValues[timeframe] = previousDirection;
     histogramValues[timeframe] = currentHistogram;
     previousHistogramValues[timeframe] = previousHistogram;
 
+    // precise rule:
+    // previous closed histogram negative
+    // current live histogram positive
     if (
       previousHistogram !== null &&
       previousHistogram < 0 &&
