@@ -8,11 +8,26 @@ function histogramDirection(candles) {
   }
 
   const histogram = Number(macdHistogram(candles));
-
   if (!Number.isFinite(histogram)) return 'neutral';
   if (histogram > 0) return 'bullish';
   if (histogram < 0) return 'negative';
   return 'neutral';
+}
+
+function getHistogram(candles) {
+  if (!Array.isArray(candles) || candles.length < 26) {
+    return null;
+  }
+
+  const value = Number(macdHistogram(candles));
+  return Number.isFinite(value) ? value : null;
+}
+
+function getLastCandleTime(candles) {
+  if (!Array.isArray(candles) || candles.length === 0) return null;
+  const last = candles[candles.length - 1];
+  const time = Number(last?.open_time ?? last?.start ?? last?.t ?? last?.timestamp ?? 0);
+  return Number.isFinite(time) && time > 0 ? time : null;
 }
 
 function evaluateMtfAlignment(candlesByTf = {}) {
@@ -21,20 +36,18 @@ function evaluateMtfAlignment(candlesByTf = {}) {
   const histogramValues = {};
   const previousHistogramValues = {};
   const flippedBullish = [];
+  const flipCandleTimes = {};
 
   for (const timeframe of REQUIRED_MTF_TFS) {
     const candles = Array.isArray(candlesByTf[timeframe])
       ? candlesByTf[timeframe]
       : [];
 
-    const currentHistogram = candles.length >= 26
-      ? Number(macdHistogram(candles))
-      : null;
+    const currentHistogram = getHistogram(candles);
 
-    // The final candle is the currently forming candle. Excluding it lets us
-    // compare its live histogram against the previous candle's closed value.
+    // compare current live candle against the last closed candle
     const previousHistogram = candles.length >= 27
-      ? Number(macdHistogram(candles.slice(0, -1)))
+      ? getHistogram(candles.slice(0, -1))
       : null;
 
     const currentDirection = currentHistogram === null
@@ -58,8 +71,6 @@ function evaluateMtfAlignment(candlesByTf = {}) {
     histogramValues[timeframe] = currentHistogram;
     previousHistogramValues[timeframe] = previousHistogram;
 
-    // The requested flip is negative on the previous candle and positive on
-    // the currently forming candle.
     if (
       previousHistogram !== null &&
       previousHistogram < 0 &&
@@ -67,6 +78,7 @@ function evaluateMtfAlignment(candlesByTf = {}) {
       currentHistogram > 0
     ) {
       flippedBullish.push(timeframe);
+      flipCandleTimes[timeframe] = getLastCandleTime(candles);
     }
   }
 
@@ -89,6 +101,18 @@ function evaluateMtfAlignment(candlesByTf = {}) {
   else if (negativeCount === REQUIRED_MTF_TFS.length) status = 'negative';
   else if (neutralCount === REQUIRED_MTF_TFS.length) status = 'neutral';
 
+  const latestFlippedBullish = flippedBullish
+    .map((timeframe) => ({
+      timeframe,
+      candleTime: flipCandleTimes[timeframe]
+    }))
+    .sort((a, b) => {
+      if (a.candleTime === null && b.candleTime === null) return 0;
+      if (a.candleTime === null) return 1;
+      if (b.candleTime === null) return -1;
+      return b.candleTime - a.candleTime;
+    })[0] || null;
+
   return {
     status,
     values,
@@ -96,10 +120,11 @@ function evaluateMtfAlignment(candlesByTf = {}) {
     histogramValues,
     previousHistogramValues,
     aligned,
-    // This identifies a current-candle negative-to-positive flip. The alert
-    // still requires every required timeframe to be bullish.
-    alignmentFlip: aligned && flippedBullish.length > 0,
+    alignmentFlip: aligned && latestFlippedBullish !== null,
     flippedBullish,
+    flipCandleTimes,
+    latestFlippedBullishTimeframe: latestFlippedBullish?.timeframe || null,
+    latestFlipCandleTime: latestFlippedBullish?.candleTime || null,
     bullish: bullishCount,
     negative: negativeCount,
     neutral: neutralCount
