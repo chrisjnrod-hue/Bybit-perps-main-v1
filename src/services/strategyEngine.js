@@ -69,6 +69,7 @@ const pendingEvaluations = new Map();
 const deferredSymbols = new Set();
 const bufferedKlines = new Map();
 const tradeCandidates = new Map();
+const activeRoots = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -182,7 +183,6 @@ function isFinalBullishMtfFlip(signal) {
     );
   });
 
-  // immediate alert case: all required MTFs are already bullish at root discovery
   if (allCurrentBullish) return true;
 
   const latestFlipTf =
@@ -210,14 +210,15 @@ function isFinalBullishMtfFlip(signal) {
   return nowBullish && prevNegative;
 }
 
-async function maybeSendAlignmentAlert(signal, marketData) {
+async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
   const immediateAlert =
+    rootDiscovered &&
     signal?.mtfAligned === true &&
     signal?.mtfStatus === 'bullish';
 
-  const finalFlipAlert = isFinalBullishMtfFlip(signal);
+  const finalFlipAlert = signal?.mtfAlignmentFlip === true || isFinalBullishMtfFlip(signal);
 
   if (!immediateAlert && !finalFlipAlert) {
     return false;
@@ -327,8 +328,40 @@ async function flushTradeCandidateQueue() {
 }
 
 async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
-  const daily = await getDailyRoot(symbol);
-  if (!daily) return null;
+  const dailyCandles = await getCandles(symbol, 'D');
+
+  if (!Array.isArray(dailyCandles) || dailyCandles.length < 8) {
+    return null;
+  }
+
+  const latestDailyCandle = dailyCandles[dailyCandles.length - 1];
+  const dailyCandleTime = Number(latestDailyCandle?.open_time || 0) || null;
+
+  const marketData = await getMarketDataCached(symbol);
+  const detectedRoot = detectDailyRootSignal(dailyCandles, {
+    symbol,
+    lastPrice: marketData.lastPrice
+  });
+
+  let activeRoot = activeRoots.get(symbol);
+
+  if (activeRoot && activeRoot.dailyCandleTime !== dailyCandleTime) {
+    activeRoots.delete(symbol);
+    activeRoot = null;
+  }
+
+  let rootDiscovered = false;
+
+  if (detectedRoot && !activeRoot) {
+    activeRoot = {
+      dailyCandleTime,
+      root: { ...detectedRoot, symbol }
+    };
+    activeRoots.set(symbol, activeRoot);
+    rootDiscovered = true;
+  }
+
+  if (!activeRoot) return null;
 
   const mtfCandles = {};
   for (const timeframe of MTF_TIMEFRAMES) {
@@ -337,8 +370,9 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
 
   const signal = await evaluateSignal(
     symbol,
-    { ...mtfCandles, D: daily.dailyCandles },
-    daily.marketData
+    { ...mtfCandles, D: dailyCandles },
+    marketData,
+    { rootActive: true }
   );
 
   if (!signal) return null;
@@ -346,17 +380,17 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
   await recordSignal(signal);
 
   if (sendAlerts) {
-    await maybeSendAlignmentAlert(signal, daily.marketData);
+    await maybeSendAlignmentAlert(signal, marketData, rootDiscovered);
 
     if (hasLiveAccountConfig()) {
-      queueTradeCandidate(signal, daily.marketData);
+      queueTradeCandidate(signal, marketData);
     }
   }
 
   return {
-    root: daily.root,
+    root: activeRoot.root,
     signal,
-    marketData: daily.marketData
+    marketData
   };
 }
 
@@ -518,23 +552,37 @@ function rootSummaryKey(root) {
 }
 
 async function sendRootSummary(roots, scanType) {
-  const rootsToSend = (roots || []).map((root) => ({
-    ...root,
-    summaryKey: rootSummaryKey(root)
-  }));
+  const rootsToSend = [];
+
+  for (const root of roots || []) {
+    const summaryKey = rootSummaryKey(root);
+
+    if (await notificationWasSent(summaryKey)) continue;
+
+    rootsToSend.push({
+      ...root,
+      summaryKey
+    });
+  }
+
+  rootsToSend.sort((a, b) =>
+    String(a.symbol).localeCompare(String(b.symbol))
+  );
 
   if (rootsToSend.length === 0) {
     if (scanType === 'boundary') {
       await sendTelegramBlock(
-        'No new root signals at this scan interval.',
-        `no-new-root:${Date.now()}`
+        'No new signals at this time interval.',
+        `no-new-root:${scanType}:${Date.now()}`
       );
     }
     return [];
   }
 
   const chunks = formatSummaryTelegramChunks(rootsToSend);
-  const batchKey = `${scanType}:${Date.now()}`;
+  const batchKey = `${scanType}:${rootsToSend
+    .map((root) => root.summaryKey)
+    .join('|')}`;
 
   let allChunksSent = true;
 
@@ -551,19 +599,18 @@ async function sendRootSummary(roots, scanType) {
     }
   }
 
-  if (allChunksSent) {
-    for (const root of rootsToSend) {
-      await markNotificationSent(
-        root.summaryKey,
-        root.symbol,
-        root.dailyCandleTime,
-        root.reason
-      );
-    }
-    return rootsToSend;
+  if (!allChunksSent) return [];
+
+  for (const root of rootsToSend) {
+    await markNotificationSent(
+      root.summaryKey,
+      root.symbol,
+      root.dailyCandleTime,
+      root.reason
+    );
   }
 
-  return [];
+  return rootsToSend;
 }
 
 async function collectCurrentRoots(symbolList) {
