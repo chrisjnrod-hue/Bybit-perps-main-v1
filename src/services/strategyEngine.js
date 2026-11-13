@@ -1,3 +1,4 @@
+// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -38,13 +39,6 @@ const { setupKeepAlive } = require('./keepalive');
 
 const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
 const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
-const BYBIT_TF_MS = {
-  '5': 5 * 60 * 1000,
-  '15': 15 * 60 * 1000,
-  '60': 60 * 60 * 1000,
-  '240': 4 * 60 * 60 * 1000,
-  D: 24 * 60 * 60 * 1000
-};
 
 const ROOT_SUMMARY_PREFIX = 'root-summary';
 const ALIGNMENT_PREFIX = 'mtf-alignment';
@@ -72,15 +66,6 @@ const tradeCandidates = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function hasLiveAccountConfig() {
-  return Boolean(
-    config.BYBIT_API_KEY &&
-    config.BYBIT_API_SECRET &&
-    String(config.BYBIT_API_KEY).trim() &&
-    String(config.BYBIT_API_SECRET).trim()
-  );
 }
 
 function dailySignalKey(signal) {
@@ -166,60 +151,8 @@ function alertData(signal, marketData) {
   };
 }
 
-function isFinalBullishMtfFlip(signal) {
-  const current = signal?.mtfValues || {};
-  const previous = signal?.mtfPreviousValues || {};
-
-  const required = ['5', '15', '60', '240'];
-
-  const allCurrentBullish = required.every((tf) => {
-    const value = current[tf];
-    return (
-      value === true ||
-      String(value).toLowerCase() === 'bullish' ||
-      String(value).toLowerCase() === 'positive' ||
-      Number(value) > 0
-    );
-  });
-
-  // immediate alert case: all required MTFs are already bullish at root discovery
-  if (allCurrentBullish) return true;
-
-  const latestFlipTf =
-    signal?.latestFlippedBullishTimeframe ||
-    signal?.mtfLatestFlippedBullish ||
-    null;
-
-  if (!latestFlipTf) return false;
-
-  const now = current[latestFlipTf];
-  const prev = previous[latestFlipTf];
-
-  const nowBullish =
-    now === true ||
-    String(now).toLowerCase() === 'bullish' ||
-    String(now).toLowerCase() === 'positive' ||
-    Number(now) > 0;
-
-  const prevNegative =
-    prev === false ||
-    String(prev).toLowerCase() === 'negative' ||
-    String(prev).toLowerCase() === 'bearish' ||
-    Number(prev) < 0;
-
-  return nowBullish && prevNegative;
-}
-
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (!signal || !signal.symbol) return false;
-
-  const immediateAlert =
-    signal?.mtfAligned === true &&
-    signal?.mtfStatus === 'bullish';
-
-  const finalFlipAlert = isFinalBullishMtfFlip(signal);
-
-  if (!immediateAlert && !finalFlipAlert) {
+  if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
     return false;
   }
 
@@ -239,7 +172,6 @@ async function maybeSendAlignmentAlert(signal, marketData) {
     signal.dailyCandleTime,
     signal.reason
   );
-
   return true;
 }
 
@@ -347,10 +279,7 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
 
   if (sendAlerts) {
     await maybeSendAlignmentAlert(signal, daily.marketData);
-
-    if (hasLiveAccountConfig()) {
-      queueTradeCandidate(signal, daily.marketData);
-    }
+    queueTradeCandidate(signal, daily.marketData);
   }
 
   return {
@@ -447,20 +376,39 @@ async function processSymbol(symbol) {
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
+  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
 
 async function discoverSymbols() {
-  let instruments = await fetchAllSymbols();
+  let instruments;
+
+  if (Array.isArray(config.WATCH_SYMBOLS) && config.WATCH_SYMBOLS.length > 0) {
+    instruments = config.WATCH_SYMBOLS
+      .map((rawSymbol) => String(rawSymbol).trim().toUpperCase())
+      .filter(Boolean)
+      .map((symbol) => ({
+        symbol,
+        base: symbol.replace(/USDT(\.P)?$/i, ''),
+        quote: 'USDT'
+      }));
+  } else {
+    instruments = await fetchAllSymbols();
+  }
 
   const selected = filterUsdtPerpetualSymbols(instruments);
+  const maxSymbols = Number(config.STARTUP_SCAN_MAX_SYMBOLS || 0);
+
+  const finalSymbols = maxSymbols > 0
+    ? selected.slice(0, maxSymbols)
+    : selected;
 
   const instrumentBySymbol = new Map(
     instruments.map((item) => [String(item.symbol).toUpperCase(), item])
   );
 
-  for (const symbol of selected) {
+  for (const symbol of finalSymbols) {
     const instrument = instrumentBySymbol.get(symbol);
     await upsertSymbol(
       symbol,
@@ -473,7 +421,7 @@ async function discoverSymbols() {
 
   if (!symbols.size) {
     throw new Error(
-      'No symbols selected. Check symbol discovery/filter settings.'
+      'No symbols selected. Set WATCH_SYMBOLS or check symbol discovery/filter settings.'
     );
   }
 
@@ -518,12 +466,16 @@ function rootSummaryKey(root) {
 }
 
 async function sendRootSummary(roots, scanType) {
-  const rootsToSend = (roots || []).map((root) => ({
-    ...root,
-    summaryKey: rootSummaryKey(root)
-  }));
+  const unseen = [];
 
-  if (rootsToSend.length === 0) {
+  for (const root of roots) {
+    const key = rootSummaryKey(root);
+    if (!(await notificationWasSent(key))) {
+      unseen.push({ ...root, summaryKey: key });
+    }
+  }
+
+  if (unseen.length === 0) {
     if (scanType === 'boundary') {
       await sendTelegramBlock(
         'No new root signals at this scan interval.',
@@ -533,8 +485,11 @@ async function sendRootSummary(roots, scanType) {
     return [];
   }
 
-  const chunks = formatSummaryTelegramChunks(rootsToSend);
-  const batchKey = `${scanType}:${Date.now()}`;
+  const chunks = formatSummaryTelegramChunks(unseen);
+  const batchKey = `${scanType}:${unseen
+    .map((root) => root.summaryKey)
+    .sort()
+    .join('|')}`;
 
   let allChunksSent = true;
 
@@ -552,7 +507,7 @@ async function sendRootSummary(roots, scanType) {
   }
 
   if (allChunksSent) {
-    for (const root of rootsToSend) {
+    for (const root of unseen) {
       await markNotificationSent(
         root.summaryKey,
         root.symbol,
@@ -560,7 +515,7 @@ async function sendRootSummary(roots, scanType) {
         root.reason
       );
     }
-    return rootsToSend;
+    return unseen;
   }
 
   return [];
@@ -607,6 +562,7 @@ async function runInitialScan(symbolList) {
 
   try {
     const roots = await collectCurrentRoots(symbolList);
+
     await sendRootSummary(roots, 'startup');
     await dispatchRoots(roots);
   } finally {
@@ -622,7 +578,9 @@ async function runBoundaryScan() {
 
   try {
     const roots = await collectCurrentRoots([...symbols]);
+
     await sendRootSummary(roots, 'boundary');
+
     await dispatchRoots(roots);
   } catch (error) {
     console.error('Boundary scan failed:', error);
@@ -644,40 +602,21 @@ async function drainDeferredSymbols() {
   }
 }
 
-function resolveBoundaryScanTimeframe() {
-  const configuredMs = Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000);
+function nextWallClockBoundaryDelayMs() {
+  const interval = Math.max(
+    60000,
+    Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000)
+  );
 
-  const exact = Object.entries(BYBIT_TF_MS).find(([, ms]) => ms === configuredMs);
-  if (exact) return exact[0];
-
-  const sorted = Object.entries(BYBIT_TF_MS).sort((a, b) => a[1] - b[1]);
-  for (const [tf, ms] of sorted) {
-    if (configuredMs <= ms) return tf;
-  }
-
-  return '15';
-}
-
-function nextWallClockBoundaryDelayMs(timeframe = '15') {
-  const intervalMs = BYBIT_TF_MS[String(timeframe)] || BYBIT_TF_MS['15'];
-  const now = Date.now();
-  const remainder = now % intervalMs;
-
-  if (remainder === 0) {
-    return intervalMs;
-  }
-
-  const nextBoundary = now + (intervalMs - remainder);
-  return Math.max(250, nextBoundary - now);
+  const remainder = Date.now() % interval;
+  return remainder === 0 ? interval : interval - remainder;
 }
 
 function scheduleNextBoundary() {
-  const timeframe = resolveBoundaryScanTimeframe();
-
   const timer = setTimeout(async () => {
     await runBoundaryScan();
     scheduleNextBoundary();
-  }, nextWallClockBoundaryDelayMs(timeframe));
+  }, nextWallClockBoundaryDelayMs());
 
   timer.unref?.();
 }
@@ -763,6 +702,7 @@ async function bootstrapStrategy() {
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
 
+  // Important: subscribe in a safe way; bybitWs now chunks to <=10 topics per request.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
