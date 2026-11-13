@@ -1,4 +1,3 @@
-// src/services/strategyEngine.js
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
@@ -39,6 +38,13 @@ const { setupKeepAlive } = require('./keepalive');
 
 const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
 const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
+const BYBIT_TF_MS = {
+  '5': 5 * 60 * 1000,
+  '15': 15 * 60 * 1000,
+  '60': 60 * 60 * 1000,
+  '240': 4 * 60 * 60 * 1000,
+  D: 24 * 60 * 60 * 1000
+};
 
 const ROOT_SUMMARY_PREFIX = 'root-summary';
 const ALIGNMENT_PREFIX = 'mtf-alignment';
@@ -66,6 +72,15 @@ const tradeCandidates = new Map();
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasLiveAccountConfig() {
+  return Boolean(
+    config.BYBIT_API_KEY &&
+    config.BYBIT_API_SECRET &&
+    String(config.BYBIT_API_KEY).trim() &&
+    String(config.BYBIT_API_SECRET).trim()
+  );
 }
 
 function dailySignalKey(signal) {
@@ -151,8 +166,47 @@ function alertData(signal, marketData) {
   };
 }
 
+function isFinalBullishMtfFlip(signal) {
+  if (
+    signal?.mtfAligned === true &&
+    (
+      signal?.latestFlippedBullishTimeframe ||
+      signal?.mtfLatestFlippedBullish ||
+      signal?.mtfAlignmentFlip === true
+    )
+  ) {
+    return true;
+  }
+
+  const current = signal?.mtfValues || {};
+  const previous = signal?.mtfPreviousValues || {};
+
+  return Object.keys(current).some((tf) => {
+    const now = current[tf];
+    const prev = previous[tf];
+
+    const nowBullish =
+      now === true ||
+      String(now).toLowerCase() === 'bullish' ||
+      String(now).toLowerCase() === 'positive' ||
+      Number(now) > 0;
+
+    const prevNegative =
+      prev === false ||
+      String(prev).toLowerCase() === 'negative' ||
+      String(prev).toLowerCase() === 'bearish' ||
+      Number(prev) < 0;
+
+    return nowBullish && prevNegative;
+  });
+}
+
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (signal?.decision !== 'accept' || signal?.mtfAligned !== true) {
+  if (
+    signal?.decision !== 'accept' ||
+    signal?.mtfAligned !== true ||
+    !isFinalBullishMtfFlip(signal)
+  ) {
     return false;
   }
 
@@ -172,6 +226,7 @@ async function maybeSendAlignmentAlert(signal, marketData) {
     signal.dailyCandleTime,
     signal.reason
   );
+
   return true;
 }
 
@@ -279,7 +334,10 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
 
   if (sendAlerts) {
     await maybeSendAlignmentAlert(signal, daily.marketData);
-    queueTradeCandidate(signal, daily.marketData);
+
+    if (hasLiveAccountConfig()) {
+      queueTradeCandidate(signal, daily.marketData);
+    }
   }
 
   return {
@@ -376,7 +434,6 @@ async function processSymbol(symbol) {
 function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
-  // Clear cache so next check sees latest price/book.
   marketDataCache.delete(symbol);
   scheduleSymbolEvaluation(symbol);
 }
@@ -384,6 +441,9 @@ function handleMarketUpdate(symbol) {
 async function discoverSymbols() {
   let instruments;
 
+  // This file deliberately does not hard-block tickers; only symbolScanner.js
+  // filters stablecoin and invalid contracts. If WATCH_SYMBOLS is set, it is
+  // treated as the explicit list to scan.
   if (Array.isArray(config.WATCH_SYMBOLS) && config.WATCH_SYMBOLS.length > 0) {
     instruments = config.WATCH_SYMBOLS
       .map((rawSymbol) => String(rawSymbol).trim().toUpperCase())
@@ -466,16 +526,12 @@ function rootSummaryKey(root) {
 }
 
 async function sendRootSummary(roots, scanType) {
-  const unseen = [];
+  const rootsToSend = (roots || []).map((root) => ({
+    ...root,
+    summaryKey: rootSummaryKey(root)
+  }));
 
-  for (const root of roots) {
-    const key = rootSummaryKey(root);
-    if (!(await notificationWasSent(key))) {
-      unseen.push({ ...root, summaryKey: key });
-    }
-  }
-
-  if (unseen.length === 0) {
+  if (rootsToSend.length === 0) {
     if (scanType === 'boundary') {
       await sendTelegramBlock(
         'No new root signals at this scan interval.',
@@ -485,11 +541,8 @@ async function sendRootSummary(roots, scanType) {
     return [];
   }
 
-  const chunks = formatSummaryTelegramChunks(unseen);
-  const batchKey = `${scanType}:${unseen
-    .map((root) => root.summaryKey)
-    .sort()
-    .join('|')}`;
+  const chunks = formatSummaryTelegramChunks(rootsToSend);
+  const batchKey = `${scanType}:${Date.now()}`;
 
   let allChunksSent = true;
 
@@ -507,7 +560,7 @@ async function sendRootSummary(roots, scanType) {
   }
 
   if (allChunksSent) {
-    for (const root of unseen) {
+    for (const root of rootsToSend) {
       await markNotificationSent(
         root.summaryKey,
         root.symbol,
@@ -515,7 +568,7 @@ async function sendRootSummary(roots, scanType) {
         root.reason
       );
     }
-    return unseen;
+    return rootsToSend;
   }
 
   return [];
@@ -562,7 +615,6 @@ async function runInitialScan(symbolList) {
 
   try {
     const roots = await collectCurrentRoots(symbolList);
-
     await sendRootSummary(roots, 'startup');
     await dispatchRoots(roots);
   } finally {
@@ -578,9 +630,7 @@ async function runBoundaryScan() {
 
   try {
     const roots = await collectCurrentRoots([...symbols]);
-
     await sendRootSummary(roots, 'boundary');
-
     await dispatchRoots(roots);
   } catch (error) {
     console.error('Boundary scan failed:', error);
@@ -602,21 +652,41 @@ async function drainDeferredSymbols() {
   }
 }
 
-function nextWallClockBoundaryDelayMs() {
-  const interval = Math.max(
-    60000,
-    Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000)
-  );
+function resolveBoundaryScanTimeframe() {
+  const configuredMs = Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000);
 
-  const remainder = Date.now() % interval;
-  return remainder === 0 ? interval : interval - remainder;
+  const exact = Object.entries(BYBIT_TF_MS).find(([, ms]) => ms === configuredMs);
+  if (exact) return exact[0];
+
+  const sorted = Object.entries(BYBIT_TF_MS).sort((a, b) => a[1] - b[1]);
+  for (const [tf, ms] of sorted) {
+    if (configuredMs <= ms) return tf;
+  }
+
+  return '15';
+}
+
+function nextWallClockBoundaryDelayMs(timeframe = '15') {
+  const intervalMs = BYBIT_TF_MS[String(timeframe)] || BYBIT_TF_MS['15'];
+  const now = Date.now();
+  const remainder = now % intervalMs;
+
+  // If we're already exactly on the interval boundary, wait until the next one.
+  if (remainder === 0) {
+    return intervalMs;
+  }
+
+  const nextBoundary = now + (intervalMs - remainder);
+  return Math.max(250, nextBoundary - now);
 }
 
 function scheduleNextBoundary() {
+  const timeframe = resolveBoundaryScanTimeframe();
+
   const timer = setTimeout(async () => {
     await runBoundaryScan();
     scheduleNextBoundary();
-  }, nextWallClockBoundaryDelayMs());
+  }, nextWallClockBoundaryDelayMs(timeframe));
 
   timer.unref?.();
 }
@@ -702,7 +772,6 @@ async function bootstrapStrategy() {
   bybitWs.on('market', handleMarketUpdate);
   bybitWs.connect();
 
-  // Important: subscribe in a safe way; bybitWs now chunks to <=10 topics per request.
   bybitWs.subscribe(symbolList, TIMEFRAMES);
 
   seedingHistory = true;
