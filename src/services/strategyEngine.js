@@ -184,7 +184,10 @@ function isFinalBullishMtfFlip(signal) {
 
   if (allCurrentBullish) return true;
 
-  const latestFlipTf = signal?.latestFlippedBullishTimeframe || signal?.mtfLatestFlippedBullish || null;
+  const latestFlipTf =
+    signal?.latestFlippedBullishTimeframe ||
+    signal?.mtfLatestFlippedBullish ||
+    null;
 
   if (!latestFlipTf) return false;
 
@@ -451,6 +454,7 @@ async function discoverSymbols() {
   let instruments = await fetchAllSymbols();
 
   const selected = filterUsdtPerpetualSymbols(instruments);
+
   const instrumentBySymbol = new Map(
     instruments.map((item) => [String(item.symbol).toUpperCase(), item])
   );
@@ -469,36 +473,6 @@ async function discoverSymbols() {
   if (!symbols.size) {
     throw new Error(
       'No symbols selected. Check symbol discovery/filter settings.'
-    );
-  }
-
-  return [...symbols];
-}
-  const selected = filterUsdtPerpetualSymbols(instruments);
-  const maxSymbols = Number(config.STARTUP_SCAN_MAX_SYMBOLS || 0);
-
-  const finalSymbols = maxSymbols > 0
-    ? selected.slice(0, maxSymbols)
-    : selected;
-
-  const instrumentBySymbol = new Map(
-    instruments.map((item) => [String(item.symbol).toUpperCase(), item])
-  );
-
-  for (const symbol of finalSymbols) {
-    const instrument = instrumentBySymbol.get(symbol);
-    await upsertSymbol(
-      symbol,
-      instrument?.base || symbol.replace(/USDT(\.P)?$/i, ''),
-      instrument?.quote || 'USDT',
-      'active'
-    );
-    symbols.add(symbol);
-  }
-
-  if (!symbols.size) {
-    throw new Error(
-      'No symbols selected. Set WATCH_SYMBOLS or check symbol discovery/filter settings.'
     );
   }
 
@@ -686,10 +660,13 @@ function resolveBoundaryScanTimeframe() {
 function nextWallClockBoundaryDelayMs(timeframe = '15') {
   const intervalMs = BYBIT_TF_MS[String(timeframe)] || BYBIT_TF_MS['15'];
   const now = Date.now();
+  const remainder = now % intervalMs;
 
-  // Align to the next exact Bybit interval boundary.
-  const nextBoundary = Math.ceil(now / intervalMs) * intervalMs;
+  if (remainder === 0) {
+    return intervalMs;
+  }
 
+  const nextBoundary = now + (intervalMs - remainder);
   return Math.max(250, nextBoundary - now);
 }
 
