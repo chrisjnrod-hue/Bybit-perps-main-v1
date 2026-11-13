@@ -167,46 +167,55 @@ function alertData(signal, marketData) {
 }
 
 function isFinalBullishMtfFlip(signal) {
-  if (
-    signal?.mtfAligned === true &&
-    (
-      signal?.latestFlippedBullishTimeframe ||
-      signal?.mtfLatestFlippedBullish ||
-      signal?.mtfAlignmentFlip === true
-    )
-  ) {
-    return true;
-  }
-
   const current = signal?.mtfValues || {};
   const previous = signal?.mtfPreviousValues || {};
 
-  return Object.keys(current).some((tf) => {
-    const now = current[tf];
-    const prev = previous[tf];
+  const required = ['5', '15', '60', '240'];
 
-    const nowBullish =
-      now === true ||
-      String(now).toLowerCase() === 'bullish' ||
-      String(now).toLowerCase() === 'positive' ||
-      Number(now) > 0;
-
-    const prevNegative =
-      prev === false ||
-      String(prev).toLowerCase() === 'negative' ||
-      String(prev).toLowerCase() === 'bearish' ||
-      Number(prev) < 0;
-
-    return nowBullish && prevNegative;
+  const allCurrentBullish = required.every((tf) => {
+    const value = current[tf];
+    return (
+      value === true ||
+      String(value).toLowerCase() === 'bullish' ||
+      String(value).toLowerCase() === 'positive' ||
+      Number(value) > 0
+    );
   });
+
+  if (allCurrentBullish) return true;
+
+  const latestFlipTf = signal?.latestFlippedBullishTimeframe || signal?.mtfLatestFlippedBullish || null;
+
+  if (!latestFlipTf) return false;
+
+  const now = current[latestFlipTf];
+  const prev = previous[latestFlipTf];
+
+  const nowBullish =
+    now === true ||
+    String(now).toLowerCase() === 'bullish' ||
+    String(now).toLowerCase() === 'positive' ||
+    Number(now) > 0;
+
+  const prevNegative =
+    prev === false ||
+    String(prev).toLowerCase() === 'negative' ||
+    String(prev).toLowerCase() === 'bearish' ||
+    Number(prev) < 0;
+
+  return nowBullish && prevNegative;
 }
 
 async function maybeSendAlignmentAlert(signal, marketData) {
-  if (
-    signal?.decision !== 'accept' ||
-    signal?.mtfAligned !== true ||
-    !isFinalBullishMtfFlip(signal)
-  ) {
+  if (!signal || !signal.symbol) return false;
+
+  const rootReady =
+    signal?.mtfAligned === true &&
+    signal?.mtfStatus === 'bullish';
+
+  const flipReady = isFinalBullishMtfFlip(signal);
+
+  if (!rootReady && !flipReady) {
     return false;
   }
 
