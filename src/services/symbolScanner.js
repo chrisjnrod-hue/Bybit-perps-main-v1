@@ -1,18 +1,29 @@
-const config = require('../config');
-
 function normalizeSymbol(symbol) {
   return String(symbol || '').trim().toUpperCase();
 }
 
-function isValidSymbolPattern(symbol) {
-  const pattern = config.SYMBOL_FILTER || '.*';
+function getBaseAsset(symbol) {
+  return normalizeSymbol(symbol).replace(/USDT(?:\.P)?$/, '');
+}
 
-  try {
-    return new RegExp(pattern, 'i').test(symbol);
-  } catch (err) {
-    console.warn('Invalid SYMBOL_FILTER regex:', pattern, err.message);
-    return true;
-  }
+const STABLECOIN_BASES = new Set([
+  'DAI',
+  'FDUSD',
+  'GUSD',
+  'PYUSD',
+  'TUSD',
+  'USDC',
+  'USDD',
+  'USDE',
+  'USDP',
+  'USDS',
+  'USDT',
+  'USD1',
+  'USTC'
+]);
+
+function isStablecoinSymbol(symbol) {
+  return STABLECOIN_BASES.has(getBaseAsset(symbol));
 }
 
 function filterUsdtPerpetualSymbols(symbols) {
@@ -22,12 +33,10 @@ function filterUsdtPerpetualSymbols(symbols) {
 
       const symbol = normalizeSymbol(item.symbol);
 
-      // allow names like 10000NEXUSDT
-      if (!/^[A-Z0-9]+USDT(\.P)?$/.test(symbol)) return false;
+      // only linear USDT perpetuals
+      if (!/^[A-Z0-9]+USDT(?:\.P)?$/.test(symbol)) return false;
 
       const contractType = String(item.contractType || '').trim().toUpperCase();
-
-      // only linear perpetuals
       if (contractType && contractType !== 'LINEARPERPETUAL') {
         return false;
       }
@@ -35,18 +44,10 @@ function filterUsdtPerpetualSymbols(symbols) {
       // reject inverse or weird suffix patterns
       if (/-[0-9]{2}[A-Z]{3}[0-9]{2}$/.test(symbol)) return false;
 
-      const blocked = [
-        'AALUSDT',
-        'AAOIUSDT',
-        'TSLAUSDT',
-        'NVDAUSDT',
-        'AAPLUSDT',
-        'MSFTUSDT'
-      ];
+      // only stablecoins are excluded
+      if (isStablecoinSymbol(symbol)) return false;
 
-      if (blocked.includes(symbol)) return false;
-
-      return isValidSymbolPattern(symbol);
+      return true;
     })
     .map((item) => normalizeSymbol(item.symbol));
 }
