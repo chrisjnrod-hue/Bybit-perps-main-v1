@@ -678,14 +678,10 @@ function resolveBoundaryScanTimeframe() {
 function nextWallClockBoundaryDelayMs(timeframe = '15') {
   const intervalMs = BYBIT_TF_MS[String(timeframe)] || BYBIT_TF_MS['15'];
   const now = Date.now();
-  const remainder = now % intervalMs;
 
-  // If we're already exactly on the interval boundary, wait until the next one.
-  if (remainder === 0) {
-    return intervalMs;
-  }
+  // Align to the next exact Bybit interval boundary.
+  const nextBoundary = Math.ceil(now / intervalMs) * intervalMs;
 
-  const nextBoundary = now + (intervalMs - remainder);
   return Math.max(250, nextBoundary - now);
 }
 
