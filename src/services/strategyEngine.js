@@ -182,6 +182,7 @@ function isFinalBullishMtfFlip(signal) {
     );
   });
 
+  // immediate alert case: all required MTFs are already bullish at root discovery
   if (allCurrentBullish) return true;
 
   const latestFlipTf =
@@ -212,13 +213,13 @@ function isFinalBullishMtfFlip(signal) {
 async function maybeSendAlignmentAlert(signal, marketData) {
   if (!signal || !signal.symbol) return false;
 
-  const rootReady =
+  const immediateAlert =
     signal?.mtfAligned === true &&
     signal?.mtfStatus === 'bullish';
 
-  const flipReady = isFinalBullishMtfFlip(signal);
+  const finalFlipAlert = isFinalBullishMtfFlip(signal);
 
-  if (!rootReady && !flipReady) {
+  if (!immediateAlert && !finalFlipAlert) {
     return false;
   }
 
