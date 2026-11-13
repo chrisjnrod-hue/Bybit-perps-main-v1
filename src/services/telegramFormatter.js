@@ -89,12 +89,17 @@ function formatTvRating(signal) {
 
 function formatMtfAlignmentAlert(signal) {
   const tfString = formatMtfValues(signal.mtfValues || {});
+  const latestFlipTf =
+    signal?.latestFlippedBullishTimeframe ||
+    signal?.mtfLatestFlippedBullish ||
+    'none';
 
   return [
     `MTF Alignment Alert: ${signal.symbol}`,
     `Time: ${signal.time || new Date().toISOString()}`,
     `1D Trigger: ${signal.reason || 'n/a'}`,
     `Decision: ${signal.decision || 'monitor'}`,
+    `Latest bullish TF flip: ${latestFlipTf}`,
     `TradingView technical rating: ${formatTvRating(signal)}`,
     `Custom score: ${signal.customScore ?? 'N/A'} (${signal.customScoreLabel || 'unrated'})`,
     `MTF status: ${signal.mtfStatus || 'neutral'} [${tfString}]`,
