@@ -448,24 +448,32 @@ function handleMarketUpdate(symbol) {
 }
 
 async function discoverSymbols() {
-  let instruments;
+  let instruments = await fetchAllSymbols();
 
-  // This file deliberately does not hard-block tickers; only symbolScanner.js
-  // filters stablecoin and invalid contracts. If WATCH_SYMBOLS is set, it is
-  // treated as the explicit list to scan.
-  if (Array.isArray(config.WATCH_SYMBOLS) && config.WATCH_SYMBOLS.length > 0) {
-    instruments = config.WATCH_SYMBOLS
-      .map((rawSymbol) => String(rawSymbol).trim().toUpperCase())
-      .filter(Boolean)
-      .map((symbol) => ({
-        symbol,
-        base: symbol.replace(/USDT(\.P)?$/i, ''),
-        quote: 'USDT'
-      }));
-  } else {
-    instruments = await fetchAllSymbols();
+  const selected = filterUsdtPerpetualSymbols(instruments);
+  const instrumentBySymbol = new Map(
+    instruments.map((item) => [String(item.symbol).toUpperCase(), item])
+  );
+
+  for (const symbol of selected) {
+    const instrument = instrumentBySymbol.get(symbol);
+    await upsertSymbol(
+      symbol,
+      instrument?.base || symbol.replace(/USDT(\.P)?$/i, ''),
+      instrument?.quote || 'USDT',
+      'active'
+    );
+    symbols.add(symbol);
   }
 
+  if (!symbols.size) {
+    throw new Error(
+      'No symbols selected. Check symbol discovery/filter settings.'
+    );
+  }
+
+  return [...symbols];
+}
   const selected = filterUsdtPerpetualSymbols(instruments);
   const maxSymbols = Number(config.STARTUP_SCAN_MAX_SYMBOLS || 0);
 
