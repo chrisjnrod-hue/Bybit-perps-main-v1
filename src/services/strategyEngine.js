@@ -167,65 +167,21 @@ function alertData(signal, marketData) {
   };
 }
 
-function isFinalBullishMtfFlip(signal) {
-  if (!signal) return false;
-
-  // immediate alert case: all required MTFs are already bullish
-  const current = signal?.mtfValues || {};
-  const required = ['5', '15', '60', '240'];
-
-  const allCurrentBullish = required.every((tf) => {
-    const value = current[tf];
-    return (
-      value === true ||
-      String(value).toLowerCase() === 'bullish' ||
-      String(value).toLowerCase() === 'positive' ||
-      Number(value) > 0
-    );
-  });
-
-  if (allCurrentBullish) return true;
-
-  // delayed alert case:
-  // previous closed histogram negative, current histogram positive
-  const latestFlipTf =
-    signal?.latestFlippedBullishTimeframe ||
-    signal?.mtfLatestFlippedBullish ||
-    null;
-
-  if (!latestFlipTf) return false;
-
-  const prev = signal?.mtfPreviousValues?.[latestFlipTf];
-  const now = current[latestFlipTf];
-
-  const nowBullish =
-    now === true ||
-    String(now).toLowerCase() === 'bullish' ||
-    String(now).toLowerCase() === 'positive' ||
-    Number(now) > 0;
-
-  const prevNegative =
-    prev === false ||
-    String(prev).toLowerCase() === 'negative' ||
-    String(prev).toLowerCase() === 'bearish' ||
-    Number(prev) < 0;
-
-  return nowBullish && prevNegative;
-}
-
-async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = false) {
+function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
   const immediateAlert =
     rootDiscovered &&
-    signal?.mtfAligned === true &&
-    signal?.mtfStatus === 'bullish';
+    signal.mtfAligned === true &&
+    signal.mtfStatus === 'bullish';
 
-  const finalFlipAlert =
-    signal?.mtfAlignmentFlip === true ||
-    isFinalBullishMtfFlip(signal);
+  const delayedAlert = signal.mtfAlignmentFlip === true;
 
-  if (!immediateAlert && !finalFlipAlert) {
+  return immediateAlert || delayedAlert;
+}
+
+async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = false) {
+  if (!shouldEmitMtfAlignmentAlert(signal, rootDiscovered)) {
     return false;
   }
 
@@ -373,12 +329,19 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
     mtfCandles[timeframe] = await getCandles(symbol, timeframe);
   }
 
-  const signal = await evaluateSignal(
-    symbol,
-    { ...mtfCandles, D: dailyCandles },
-    marketData,
-    { rootActive: true }
-  );
+  let signal = null;
+
+  try {
+    signal = await evaluateSignal(
+      symbol,
+      { ...mtfCandles, D: dailyCandles },
+      marketData,
+      { rootActive: true }
+    );
+  } catch (error) {
+    console.error(`Signal evaluation failed for ${symbol}:`, error.message);
+    return null;
+  }
 
   if (!signal) return null;
 
@@ -557,35 +520,62 @@ function rootSummaryKey(root) {
 }
 
 async function sendRootSummary(roots, scanType) {
-  const rootsToSend = [];
+  const summaryRoots = (roots || []).map((root) => ({
+    ...root,
+    summaryKey: rootSummaryKey(root)
+  }));
 
-  for (const root of roots || []) {
-    const summaryKey = rootSummaryKey(root);
+  if (scanType === 'startup') {
+    if (summaryRoots.length === 0) return [];
+    const chunks = formatSummaryTelegramChunks(summaryRoots);
+    const batchKey = `${scanType}:${Date.now()}`;
 
-    if (await notificationWasSent(summaryKey)) continue;
+    let allChunksSent = true;
 
-    rootsToSend.push({
-      ...root,
-      summaryKey
-    });
-  }
+    for (let index = 0; index < chunks.length; index++) {
+      const result = await sendTelegramBlock(
+        chunks[index],
+        `${batchKey}:chunk:${index}`
+      );
+      if (!result) allChunksSent = false;
 
-  rootsToSend.sort((a, b) =>
-    String(a.symbol).localeCompare(String(b.symbol))
-  );
+      if (config.TELEGRAM_SEND_DELAY_MS > 0) {
+        await delay(config.TELEGRAM_SEND_DELAY_MS);
+      }
+    }
 
-  if (rootsToSend.length === 0) {
-    if (scanType === 'boundary') {
-      await sendTelegramBlock(
-        'No new signals at this time interval.',
-        `no-new-root:${scanType}:${Date.now()}`
+    if (!allChunksSent) return [];
+
+    for (const root of summaryRoots) {
+      await markNotificationSent(
+        root.summaryKey,
+        root.symbol,
+        root.dailyCandleTime,
+        root.reason
       );
     }
+
+    return summaryRoots;
+  }
+
+  const unseenRoots = [];
+
+  for (const root of summaryRoots) {
+    const key = root.summaryKey;
+    if (await notificationWasSent(key)) continue;
+    unseenRoots.push(root);
+  }
+
+  if (unseenRoots.length === 0) {
+    await sendTelegramBlock(
+      'No new signals at this time interval.',
+      `no-new-root:${scanType}:${Date.now()}`
+    );
     return [];
   }
 
-  const chunks = formatSummaryTelegramChunks(rootsToSend);
-  const batchKey = `${scanType}:${rootsToSend
+  const chunks = formatSummaryTelegramChunks(unseenRoots);
+  const batchKey = `${scanType}:${unseenRoots
     .map((root) => root.summaryKey)
     .join('|')}`;
 
@@ -596,7 +586,6 @@ async function sendRootSummary(roots, scanType) {
       chunks[index],
       `${batchKey}:chunk:${index}`
     );
-
     if (!result) allChunksSent = false;
 
     if (config.TELEGRAM_SEND_DELAY_MS > 0) {
@@ -606,7 +595,7 @@ async function sendRootSummary(roots, scanType) {
 
   if (!allChunksSent) return [];
 
-  for (const root of rootsToSend) {
+  for (const root of unseenRoots) {
     await markNotificationSent(
       root.summaryKey,
       root.symbol,
@@ -615,7 +604,7 @@ async function sendRootSummary(roots, scanType) {
     );
   }
 
-  return rootsToSend;
+  return unseenRoots;
 }
 
 async function collectCurrentRoots(symbolList) {
