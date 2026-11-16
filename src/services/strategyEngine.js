@@ -178,12 +178,20 @@ function alertData(signal, marketData) {
 function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
-  const alignedConfirmed =
+  // 1. Immediate alert: all MTF TFs confirmed positive upon 1D root discovery
+  const immediateAlert =
+    rootDiscovered === true &&
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish';
 
-  const immediateAlert = rootDiscovered && alignedConfirmed;
-  const delayedAlert = signal.mtfAlignmentFlip === true || alignedConfirmed;
+  // 2. Delayed alert: root already discovered while some MTF TFs were negative;
+  // fires on the exact open candle where the last negative MTF TF flips positive
+  // after closing red, making all MTF TFs positive.
+  const delayedAlert =
+    rootDiscovered === false &&
+    signal.mtfAligned === true &&
+    signal.mtfStatus === 'bullish' &&
+    signal.mtfAlignmentFlip === true;
 
   return immediateAlert || delayedAlert;
 }
@@ -319,18 +327,24 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
     activeRoot = null;
   }
 
+  // If the symbol no longer meets the 1D root criteria, drop it from active monitoring
+  if (!detectedRoot) {
+    if (activeRoot) {
+      activeRoots.delete(symbol);
+    }
+    return null;
+  }
+
   let rootDiscovered = false;
   let candidateRoot = activeRoot;
 
-  if (detectedRoot && !candidateRoot) {
+  if (!candidateRoot) {
     candidateRoot = {
       dailyCandleTime,
       root: { ...detectedRoot, symbol }
     };
     rootDiscovered = true;
   }
-
-  if (!candidateRoot) return null;
 
   const mtfCandles = {};
   for (const timeframe of MTF_TIMEFRAMES) {
@@ -343,8 +357,7 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
     signal = await evaluateSignal(
       symbol,
       { ...mtfCandles, D: dailyCandles },
-      marketData,
-      { rootActive: true }
+      marketData
     );
   } catch (error) {
     console.error(`Signal evaluation failed for ${symbol}:`, error.message);
@@ -353,8 +366,6 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
 
   if (!signal) return null;
 
-  // Commit activeRoot only after evaluateSignal succeeds so transient errors
-  // do not swallow rootDiscovered on subsequent ticks.
   if (rootDiscovered) {
     activeRoots.set(symbol, candidateRoot);
   }
@@ -498,7 +509,7 @@ async function discoverSymbols() {
 
 async function seedHistoricalCandles(symbolList) {
   const requestedLimit = Number(config.SEED_KLINES_LIMIT || 120);
-  const limit = Math.max(26, Math.min(200, requestedLimit));
+  const limit = Math.max(27, Math.min(200, requestedLimit));
   const concurrency = Math.max(1, Number(config.SEED_CONCURRENCY || 1));
   let cursor = 0;
 
@@ -677,6 +688,8 @@ async function runBoundaryScan() {
   batchScanRunning = true;
 
   try {
+    // Force fresh market data evaluation at boundary scan
+    marketDataCache.clear();
     const roots = await collectCurrentRoots([...symbols]);
     await sendRootSummary(roots, 'boundary');
     await dispatchRoots(roots);
