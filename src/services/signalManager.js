@@ -93,26 +93,35 @@ async function evaluateSignal(
     '240': candlesByTf['240'] || []
   });
 
-  const { totalEquityUsd } = await getAccountEquity();
+  let liquidity = {
+    valid: false,
+    reason: 'Live account equity unavailable'
+  };
 
-  if (!Number.isFinite(totalEquityUsd) || totalEquityUsd <= 0) {
-    throw new Error('Live account equity is unavailable; refusing liquidity evaluation.');
+  try {
+    const { totalEquityUsd } = await getAccountEquity();
+
+    if (Number.isFinite(totalEquityUsd) && totalEquityUsd > 0) {
+      const targetPositionUsd =
+        (totalEquityUsd * liquidityConfig.riskPercentage) /
+        liquidityConfig.stopLossPercentage;
+
+      liquidity = checkLiquidity(
+        {
+          symbol,
+          lastPrice: currentPrice,
+          volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
+          spreadPct: Number(ticker?.spreadPct || 0),
+          topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
+        },
+        targetPositionUsd
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `[signalManager] Equity/liquidity check skipped for ${symbol}: ${error.message}`
+    );
   }
-
-  const targetPositionUsd =
-    (totalEquityUsd * liquidityConfig.riskPercentage) /
-    liquidityConfig.stopLossPercentage;
-
-  const liquidity = checkLiquidity(
-    {
-      symbol,
-      lastPrice: currentPrice,
-      volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
-      spreadPct: Number(ticker?.spreadPct || 0),
-      topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
-    },
-    targetPositionUsd
-  );
 
   const customRating = calculateCustomRating({
     macdFlip: positiveFlip,
