@@ -1,6 +1,12 @@
 const { macdHistogram } = require('./macd');
 
 const REQUIRED_MTF_TFS = ['5', '15', '60', '240'];
+const TF_MS = {
+  '5': 5 * 60 * 1000,
+  '15': 15 * 60 * 1000,
+  '60': 60 * 60 * 1000,
+  '240': 4 * 60 * 60 * 1000
+};
 
 function getHistogram(candles) {
   if (!Array.isArray(candles) || candles.length < 26) {
@@ -18,6 +24,15 @@ function getLastCandleTime(candles) {
   return Number.isFinite(time) && time > 0 ? time : null;
 }
 
+function isCurrentOpenCandle(candleOpenTime, timeframe, nowMs = Date.now()) {
+  const intervalMs = TF_MS[String(timeframe)];
+  if (!intervalMs || !Number.isFinite(candleOpenTime) || candleOpenTime <= 0) {
+    return false;
+  }
+  const currentBucketStart = Math.floor(nowMs / intervalMs) * intervalMs;
+  return candleOpenTime === currentBucketStart;
+}
+
 function directionFromHistogram(histogram) {
   if (histogram === null) return 'neutral';
   if (histogram > 0) return 'bullish';
@@ -25,7 +40,7 @@ function directionFromHistogram(histogram) {
   return 'neutral';
 }
 
-function evaluateMtfAlignment(candlesByTf = {}) {
+function evaluateMtfAlignment(candlesByTf = {}, nowMs = Date.now()) {
   const values = {};
   const previousValues = {};
   const histogramValues = {};
@@ -51,17 +66,21 @@ function evaluateMtfAlignment(candlesByTf = {}) {
     histogramValues[timeframe] = currentHistogram;
     previousHistogramValues[timeframe] = previousHistogram;
 
-    // precise rule:
-    // previous closed histogram negative
-    // current live histogram positive
+    const lastCandleTime = getLastCandleTime(candles);
+
+    // Strict rule:
+    // 1. Previous closed candle histogram strictly negative (< 0, closed red)
+    // 2. Current open candle histogram strictly positive (> 0)
+    // 3. The flip candle is the currently active open candle for that timeframe
     if (
       previousHistogram !== null &&
       previousHistogram < 0 &&
       currentHistogram !== null &&
-      currentHistogram > 0
+      currentHistogram > 0 &&
+      isCurrentOpenCandle(lastCandleTime, timeframe, nowMs)
     ) {
       flippedBullish.push(timeframe);
-      flipCandleTimes[timeframe] = getLastCandleTime(candles);
+      flipCandleTimes[timeframe] = lastCandleTime;
     }
   }
 
@@ -77,6 +96,7 @@ function evaluateMtfAlignment(candlesByTf = {}) {
     (timeframe) => values[timeframe] === 'neutral'
   ).length;
 
+  // All 4 MTF timeframes must have strictly positive MACD histogram
   const aligned = bullishCount === REQUIRED_MTF_TFS.length;
 
   let status = 'mixed';
