@@ -75,6 +75,13 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isBoundaryScanEnabled() {
+  if (typeof config.ENABLE_BOUNDARY_SCAN === 'boolean') {
+    return config.ENABLE_BOUNDARY_SCAN;
+  }
+  return String(config.ENABLE_BOUNDARY_SCAN || '').trim().toLowerCase() === 'true';
+}
+
 function hasLiveAccountConfig() {
   return Boolean(
     config.BYBIT_API_KEY &&
@@ -157,6 +164,7 @@ function alertData(signal, marketData) {
     tvScoreAvailable: signal.tvScoreAvailable,
     mtfStatus: signal.mtfStatus,
     mtfValues: signal.mtfValues,
+    mtfLatestFlippedBullish: signal.mtfLatestFlippedBullish,
     price: Number(signal.price || marketData.lastPrice || 0),
     volume24h: Number(marketData.volume24hUsd || 0),
     spreadPct: Number(marketData.spreadPct || 0),
@@ -170,12 +178,12 @@ function alertData(signal, marketData) {
 function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
-  const immediateAlert =
-    rootDiscovered &&
+  const alignedConfirmed =
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish';
 
-  const delayedAlert = signal.mtfAlignmentFlip === true;
+  const immediateAlert = rootDiscovered && alignedConfirmed;
+  const delayedAlert = signal.mtfAlignmentFlip === true || alignedConfirmed;
 
   return immediateAlert || delayedAlert;
 }
@@ -231,7 +239,7 @@ async function flushTradeCandidateQueue() {
   tradeCandidates.clear();
 
   for (const candidate of candidates) {
-    const { signal, marketData, market } = candidate;
+    const { signal, market } = candidate;
     const key = persistentNotificationKey(RECOMMENDATION_PREFIX, signal);
 
     try {
@@ -312,17 +320,17 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
   }
 
   let rootDiscovered = false;
+  let candidateRoot = activeRoot;
 
-  if (detectedRoot && !activeRoot) {
-    activeRoot = {
+  if (detectedRoot && !candidateRoot) {
+    candidateRoot = {
       dailyCandleTime,
       root: { ...detectedRoot, symbol }
     };
-    activeRoots.set(symbol, activeRoot);
     rootDiscovered = true;
   }
 
-  if (!activeRoot) return null;
+  if (!candidateRoot) return null;
 
   const mtfCandles = {};
   for (const timeframe of MTF_TIMEFRAMES) {
@@ -345,6 +353,12 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
 
   if (!signal) return null;
 
+  // Commit activeRoot only after evaluateSignal succeeds so transient errors
+  // do not swallow rootDiscovered on subsequent ticks.
+  if (rootDiscovered) {
+    activeRoots.set(symbol, candidateRoot);
+  }
+
   await recordSignal(signal);
 
   if (sendAlerts) {
@@ -356,7 +370,7 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
   }
 
   return {
-    root: activeRoot.root,
+    root: candidateRoot.root,
     signal,
     marketData
   };
@@ -567,9 +581,10 @@ async function sendRootSummary(roots, scanType) {
   }
 
   if (unseenRoots.length === 0) {
+    const hourlyBucket = new Date().toISOString().slice(0, 13);
     await sendTelegramBlock(
       'No new signals at this time interval.',
-      `no-new-root:${scanType}:${Date.now()}`
+      `no-new-root:${scanType}:${hourlyBucket}`
     );
     return [];
   }
@@ -834,7 +849,7 @@ async function bootstrapStrategy() {
     cleanupTimer.unref?.();
   }
 
-  if (config.ENABLE_BOUNDARY_SCAN) {
+  if (isBoundaryScanEnabled()) {
     scheduleNextBoundary();
   }
 }
