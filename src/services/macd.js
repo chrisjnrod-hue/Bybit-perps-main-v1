@@ -11,11 +11,18 @@ function ema(values, period) {
   return result;
 }
 
-function macdSeries(candles) {
-  const closes = candles.map((c) => Number(c.close || 0));
-  if (closes.length < 26) {
+function macdSeries(candles, { useOpenForLastCandle = false } = {}) {
+  if (!Array.isArray(candles) || candles.length < 26) {
     return { macd: [], signalLine: [], histogram: [] };
   }
+
+  const closes = candles.map((c, idx) => {
+    const isLast = idx === candles.length - 1;
+    if (isLast && useOpenForLastCandle) {
+      return Number(c.open ?? c.close ?? 0);
+    }
+    return Number(c.close || 0);
+  });
 
   const fastEma = [];
   const slowEma = [];
@@ -57,15 +64,15 @@ function macdSeries(candles) {
   return { macd, signalLine, histogram };
 }
 
-function macdHistogram(candles) {
-  const { histogram } = macdSeries(candles);
+function macdHistogram(candles, options = {}) {
+  const { histogram } = macdSeries(candles, options);
   return histogram.length ? histogram[histogram.length - 1] : 0;
 }
 
-function detectBullishHistogramFlip(candles) {
+function detectBullishHistogramFlip(candles, options = {}) {
   if (!Array.isArray(candles) || candles.length < 2) return false;
 
-  const { histogram } = macdSeries(candles);
+  const { histogram } = macdSeries(candles, options);
   if (histogram.length < 2) return false;
 
   const prev = histogram[histogram.length - 2];
