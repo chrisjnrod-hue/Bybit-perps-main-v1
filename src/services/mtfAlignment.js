@@ -8,6 +8,9 @@ const TF_MS = {
   '240': 4 * 60 * 60 * 1000
 };
 
+// Only allow open-candle flip triggers within the first 15 seconds of candle open
+const CANDLE_OPEN_WINDOW_MS = 15 * 1000;
+
 function getHistogram(candles) {
   if (!Array.isArray(candles) || candles.length < 26) {
     return null;
@@ -28,7 +31,6 @@ function getOpenPriceHistogram(candles) {
     return null;
   }
 
-  // Evaluate MACD histogram strictly at the current candle's open price
   const atOpenCandles = [
     ...candles.slice(0, -1),
     { ...last, close: openPrice }
@@ -45,13 +47,16 @@ function getLastCandleTime(candles) {
   return Number.isFinite(time) && time > 0 ? time : null;
 }
 
-function isCurrentOpenCandle(candleOpenTime, timeframe, nowMs = Date.now()) {
+function isAtCandleOpen(candleOpenTime, timeframe, nowMs = Date.now()) {
   const intervalMs = TF_MS[String(timeframe)];
   if (!intervalMs || !Number.isFinite(candleOpenTime) || candleOpenTime <= 0) {
     return false;
   }
   const currentBucketStart = Math.floor(nowMs / intervalMs) * intervalMs;
-  return candleOpenTime === currentBucketStart;
+  if (candleOpenTime !== currentBucketStart) return false;
+
+  const elapsedMs = nowMs - candleOpenTime;
+  return elapsedMs >= 0 && elapsedMs <= CANDLE_OPEN_WINDOW_MS;
 }
 
 function directionFromHistogram(histogram) {
@@ -90,11 +95,6 @@ function evaluateMtfAlignment(candlesByTf = {}, nowMs = Date.now()) {
 
     const lastCandleTime = getLastCandleTime(candles);
 
-    // Strict open-price flip rule:
-    // 1. Previous closed candle histogram strictly negative (< 0, closed red)
-    // 2. Histogram evaluated at the current candle's OPEN price is strictly positive (> 0)
-    // 3. Current live histogram remains positive (> 0)
-    // 4. The flip candle is the currently active open candle for that timeframe
     if (
       previousHistogram !== null &&
       previousHistogram < 0 &&
@@ -102,7 +102,7 @@ function evaluateMtfAlignment(candlesByTf = {}, nowMs = Date.now()) {
       openPriceHistogram > 0 &&
       currentHistogram !== null &&
       currentHistogram > 0 &&
-      isCurrentOpenCandle(lastCandleTime, timeframe, nowMs)
+      isAtCandleOpen(lastCandleTime, timeframe, nowMs)
     ) {
       flippedBullish.push(timeframe);
       flipCandleTimes[timeframe] = lastCandleTime;
