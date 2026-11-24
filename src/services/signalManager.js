@@ -69,4 +69,157 @@ function evaluateDailyRootCriteria(daily = [], ticker = {}) {
 }
 
 function detectDailyRootSignal(daily = [], ticker = {}) {
-  return evaluateDailyRootCriteria(
+  return evaluateDailyRootCriteria(daily, ticker);
+}
+
+async function evaluateSignal(
+  symbol,
+  candlesByTf = {},
+  ticker = {}
+) {
+  const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
+  const rootCriteria = evaluateDailyRootCriteria(daily, { ...ticker, symbol });
+
+  // Must strictly satisfy the exact same 1D root criteria on every evaluation
+  if (!rootCriteria) {
+    return null;
+  }
+
+  const latestDailyCandle = daily[daily.length - 1];
+  const {
+    currentPrice,
+    ma7,
+    openAndPriceAboveMa7,
+    positiveFlip,
+    reason
+  } = rootCriteria;
+
+  const currentDailyHistogram = macdHistogram(daily);
+  const dailyHistogramDirection =
+    currentDailyHistogram > 0
+      ? 'bullish'
+      : currentDailyHistogram < 0
+        ? 'negative'
+        : 'neutral';
+
+  const mtf = evaluateMtfAlignment({
+    '5': candlesByTf['5'] || [],
+    '15': candlesByTf['15'] || [],
+    '60': candlesByTf['60'] || [],
+    '240': candlesByTf['240'] || []
+  });
+
+  let liquidity = {
+    valid: false,
+    reason: 'Live account equity unavailable'
+  };
+
+  try {
+    const { totalEquityUsd } = await getAccountEquity();
+
+    if (Number.isFinite(totalEquityUsd) && totalEquityUsd > 0) {
+      const targetPositionUsd =
+        (totalEquityUsd * liquidityConfig.riskPercentage) /
+        liquidityConfig.stopLossPercentage;
+
+      liquidity = checkLiquidity(
+        {
+          symbol,
+          lastPrice: currentPrice,
+          volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
+          spreadPct: Number(ticker?.spreadPct || 0),
+          topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
+        },
+        targetPositionUsd
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `[signalManager] Equity/liquidity check skipped for ${symbol}: ${error.message}`
+    );
+  }
+
+  const customRating = calculateCustomRating({
+    macdFlip: positiveFlip,
+    openAboveMa7: openAndPriceAboveMa7,
+    mtfStatus: mtf.status,
+    liquidityValid: liquidity.valid,
+    marketTrend: mtf.aligned ? 'strong' : 'mixed',
+    priceBelow14Ma: false
+  });
+
+  let tvScore = null;
+  let tvScorePercent = null;
+  let tvScoreLabel = 'Unavailable';
+  let tvScoreAvailable = false;
+
+  try {
+    const tvRating = await getTradingViewRating(symbol);
+    if (tvRating) {
+      tvScore = tvRating.available ? tvRating.score : null;
+      tvScorePercent = tvRating.available ? tvRating.percent : null;
+      tvScoreLabel = tvRating.label || 'Unavailable';
+      tvScoreAvailable = tvRating.available === true;
+    }
+  } catch (error) {
+    console.error(
+      `[signalManager] TradingView rating fetch failed for ${symbol}:`,
+      error.message
+    );
+  }
+
+  const previousState = await getMtfState(symbol, 'D');
+  const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
+
+  const signal = {
+    symbol,
+    timeframe: 'D',
+    dailyCandleTime: Number(latestDailyCandle?.open_time || 0) || null,
+    decision,
+    reason,
+
+    dailyHistogram: currentDailyHistogram,
+    dailyHistogramDirection,
+    macdFlip: positiveFlip,
+    openAboveMa7: openAndPriceAboveMa7,
+    priceAboveMa7: currentPrice > ma7,
+
+    customScore: customRating.score,
+    customScoreLabel: customRating.label,
+
+    tvScore,
+    tvScorePercent,
+    tvScoreLabel,
+    tvScoreAvailable,
+
+    mtfStatus: mtf.status,
+    mtfValues: mtf.values,
+    mtfPreviousValues: mtf.previousValues,
+    mtfHistogramValues: mtf.histogramValues,
+    mtfPreviousHistogramValues: mtf.previousHistogramValues,
+    mtfAligned: mtf.aligned,
+    mtfAlignmentFlip: mtf.alignmentFlip,
+    mtfFlippedBullish: mtf.flippedBullish,
+    mtfLatestFlippedBullish: mtf.latestFlippedBullishTimeframe,
+    mtfLatestFlipCandleTime: mtf.latestFlipCandleTime,
+
+    status: decision === 'accept' ? 'new' : 'monitor',
+    price: currentPrice,
+    liquidity,
+
+    mtfTransition:
+      previousState?.state && previousState.state !== mtf.status
+        ? `${previousState.state}->${mtf.status}`
+        : 'stable'
+  };
+
+  await setMtfState(symbol, 'D', mtf.status);
+  await recordSignal(signal);
+
+  return signal;
+}
+
+module.exports = {
+  evaluateSignal,
+  detectDailyRootSignal
+};
