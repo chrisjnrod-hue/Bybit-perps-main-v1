@@ -11,6 +11,7 @@ function labelForScore(score) {
 }
 
 function isEnabled(value) {
+  if (value === undefined || value === null) return true;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') {
     return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
@@ -18,10 +19,105 @@ function isEnabled(value) {
   return Boolean(value);
 }
 
+function mapIntervalToTvColumn(interval) {
+  const raw = String(interval || '1D').trim().toUpperCase();
+  if (raw === '1D' || raw === 'D') return 'Recommend.All';
+  if (raw === '1W' || raw === 'W') return 'Recommend.All|1W';
+  if (raw === '1M' || raw === 'M') return 'Recommend.All|1M';
+  if (raw === '4H' || raw === '240') return 'Recommend.All|240';
+  if (raw === '1H' || raw === '60') return 'Recommend.All|60';
+  if (raw === '15M' || raw === '15') return 'Recommend.All|15';
+  if (raw === '5M' || raw === '5') return 'Recommend.All|5';
+  return 'Recommend.All';
+}
+
+function buildCandidateTickers(cleanSymbol) {
+  if (cleanSymbol.includes(':')) {
+    return [cleanSymbol];
+  }
+
+  const base = cleanSymbol.replace(/\.P$/i, '');
+  return [
+    `BYBIT:${base}.P`,
+    `BYBIT:${base}`,
+    `BINANCE:${base}.P`,
+    `BINANCE:${base}`
+  ];
+}
+
+async function fetchFromTvScanner(tickers, column) {
+  const response = await fetch('https://scanner.tradingview.com/crypto/scan', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0'
+    },
+    body: JSON.stringify({
+      symbols: {
+        tickers,
+        query: { types: [] }
+      },
+      columns: [column]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`TradingView scanner HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+
+  // Match in priority order of candidate tickers
+  for (const ticker of tickers) {
+    const match = rows.find((row) => String(row?.s || '').toUpperCase() === ticker);
+    const val = match?.d?.[0];
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      return val;
+    }
+  }
+
+  // Fallback to first valid numeric value returned
+  for (const row of rows) {
+    const val = row?.d?.[0];
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      return val;
+    }
+  }
+
+  return null;
+}
+
+async function fetchFromTvLibrary(tvSymbol, interval) {
+  const tvMod = await import('@mathieuc/tradingview').catch(() => null);
+  const getTechnicalAnalysis = tvMod?.getTechnicalAnalysis || tvMod?.default?.getTechnicalAnalysis;
+  if (typeof getTechnicalAnalysis !== 'function') return null;
+
+  const analysis = await getTechnicalAnalysis(tvSymbol, interval).catch(() => null);
+  const rawRecommendation =
+    analysis?.recommendation?.value ??
+    analysis?.summary?.RECOMMENDATION ??
+    analysis?.RECOMMENDATION ??
+    analysis?.indicators?.['Recommend.All'];
+
+  if (typeof rawRecommendation === 'number' && Number.isFinite(rawRecommendation)) {
+    return rawRecommendation;
+  }
+
+  if (typeof rawRecommendation === 'string') {
+    const lower = rawRecommendation.toLowerCase();
+    if (lower.includes('strong_buy') || lower.includes('strong buy')) return 1.0;
+    if (lower.includes('buy')) return 0.5;
+    if (lower.includes('strong_sell') || lower.includes('strong sell')) return -1.0;
+    if (lower.includes('sell')) return -0.5;
+    return 0.0;
+  }
+
+  return null;
+}
+
 async function getTradingViewRating(symbol) {
   const cleanSymbol = String(symbol || '').trim().toUpperCase();
-  // Ensure proper TradingView formatting (e.g. BINANCE:BTCUSDT)
-  const tvSymbol = cleanSymbol.includes(':') ? cleanSymbol : `BINANCE:${cleanSymbol}`;
 
   if (!cleanSymbol) {
     return {
@@ -52,22 +148,16 @@ async function getTradingViewRating(symbol) {
 
   try {
     const interval = String(config.TRADINGVIEW_RATING_INTERVAL || '1D');
-    
-    const tvModule = await import('@mathieuc/tradingview/data');
-    const getTechnicalAnalysis = tvModule.getTechnicalAnalysis;
+    const column = mapIntervalToTvColumn(interval);
+    const tickers = buildCandidateTickers(cleanSymbol);
 
-    // Pass interval and explicit screener options if supported by the package version
-    const analysis = await getTechnicalAnalysis({
-      symbol: tvSymbol,
-      interval: interval,
-      screener: 'crypto',
-      exchange: 'BINANCE'
-    }).catch(() => null) ?? await getTechnicalAnalysis({
-      symbol: tvSymbol,
-      interval: interval
-    });
+    let rawScore = await fetchFromTvScanner(tickers, column).catch(() => null);
 
-    if (!analysis) {
+    if (rawScore === null) {
+      rawScore = await fetchFromTvLibrary(tickers[0], interval);
+    }
+
+    if (rawScore === null || !Number.isFinite(rawScore)) {
       return {
         available: false,
         score: null,
@@ -77,35 +167,7 @@ async function getTradingViewRating(symbol) {
       };
     }
 
-    const rawRecommendation = 
-      analysis?.recommendation?.value ?? 
-      analysis?.summary?.RECOMMENDATION ?? 
-      analysis?.RECOMMENDATION ??
-      analysis?.compute?.RECOMMENDATION ??
-      analysis?.value ??
-      analysis?.indicators?.['Recommend.All'];
-    
-    let score = null;
-    if (typeof rawRecommendation === 'number') {
-      score = Math.max(-1, Math.min(1, rawRecommendation));
-    } else if (typeof rawRecommendation === 'string') {
-      const lower = rawRecommendation.toLowerCase();
-      if (lower.includes('strong_buy') || lower.includes('strong buy')) score = 1.0;
-      else if (lower.includes('buy')) score = 0.5;
-      else if (lower.includes('strong_sell') || lower.includes('strong sell')) score = -1.0;
-      else if (lower.includes('sell')) score = -0.5;
-      else score = 0.0;
-    }
-
-    if (score === null) {
-      return {
-        available: false,
-        score: null,
-        percent: null,
-        label: 'N/A',
-        source: 'TradingView'
-      };
-    }
+    const score = Math.max(-1, Math.min(1, rawScore));
 
     const rating = {
       available: true,
