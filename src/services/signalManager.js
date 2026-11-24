@@ -20,7 +20,7 @@ function getCurrentPrice(ticker, latestDailyCandle) {
 
 function detectStrictBullishDailyFlip(daily = []) {
   if (!Array.isArray(daily) || daily.length < 27) return false;
-  const { histogram } = macdSeries(daily);
+  const { histogram } = macdSeries(daily, { useOpenForLastCandle: true });
   if (histogram.length < 2) return false;
 
   const prev = histogram[histogram.length - 2];
@@ -49,7 +49,8 @@ function evaluateDailyRootCriteria(daily = [], ticker = {}) {
 
   if (!openAndPriceAboveMa7 && !positiveFlip) return null;
 
-  let reason = '1D open-candle histogram flipped positive after prior closed candle was negative';
+  let reason =
+    '1D open-candle histogram flipped positive after prior closed candle was negative';
   if (openAndPriceAboveMa7 && positiveFlip) {
     reason = '1D open and current price above 7MA with positive hist flip';
   } else if (openAndPriceAboveMa7) {
@@ -72,11 +73,7 @@ function detectDailyRootSignal(daily = [], ticker = {}) {
   return evaluateDailyRootCriteria(daily, ticker);
 }
 
-async function evaluateSignal(
-  symbol,
-  candlesByTf = {},
-  ticker = {}
-) {
+async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
   const rootCriteria = evaluateDailyRootCriteria(daily, { ...ticker, symbol });
 
@@ -94,7 +91,9 @@ async function evaluateSignal(
     reason
   } = rootCriteria;
 
-  const currentDailyHistogram = macdHistogram(daily);
+  const currentDailyHistogram = macdHistogram(daily, {
+    useOpenForLastCandle: true
+  });
   const dailyHistogramDirection =
     currentDailyHistogram > 0
       ? 'bullish'
@@ -148,28 +147,38 @@ async function evaluateSignal(
     priceBelow14Ma: false
   });
 
-  let tvScore = null;
-  let tvScorePercent = null;
-  let tvScoreLabel = 'Unavailable';
-  let tvScoreAvailable = false;
+  let tvRating = {
+    available: false,
+    score: null,
+    percent: null,
+    label: 'N/A'
+  };
 
   try {
-    const tvRating = await getTradingViewRating(symbol);
-    if (tvRating) {
-      tvScore = tvRating.available ? tvRating.score : null;
-      tvScorePercent = tvRating.available ? tvRating.percent : null;
-      tvScoreLabel = tvRating.label || 'Unavailable';
-      tvScoreAvailable = tvRating.available === true;
-    }
+    const tvTimeoutMs = Math.max(
+      1000,
+      Number(config.TRADINGVIEW_TIMEOUT_MS || 4000)
+    );
+    tvRating = await Promise.race([
+      getTradingViewRating(symbol),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('TradingView timeout')), tvTimeoutMs)
+      )
+    ]);
   } catch (error) {
-    console.error(
-      `[signalManager] TradingView rating fetch failed for ${symbol}:`,
-      error.message
+    console.warn(
+      `[signalManager] TradingView rating lookup skipped for ${symbol}: ${error.message}`
     );
   }
 
   const previousState = await getMtfState(symbol, 'D');
   const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
+
+  const latestFlippedTf =
+    mtf.latestFlippedBullishTimeframe || (positiveFlip ? '1D' : null);
+  const latestFlipTime =
+    mtf.latestFlipCandleTime ||
+    (positiveFlip ? Number(latestDailyCandle?.open_time || 0) || null : null);
 
   const signal = {
     symbol,
@@ -187,10 +196,10 @@ async function evaluateSignal(
     customScore: customRating.score,
     customScoreLabel: customRating.label,
 
-    tvScore,
-    tvScorePercent,
-    tvScoreLabel,
-    tvScoreAvailable,
+    tvScore: tvRating.available ? tvRating.score : null,
+    tvScorePercent: tvRating.available ? tvRating.percent : null,
+    tvScoreLabel: tvRating.label || 'N/A',
+    tvScoreAvailable: Boolean(tvRating.available),
 
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
@@ -200,8 +209,8 @@ async function evaluateSignal(
     mtfAligned: mtf.aligned,
     mtfAlignmentFlip: mtf.alignmentFlip,
     mtfFlippedBullish: mtf.flippedBullish,
-    mtfLatestFlippedBullish: mtf.latestFlippedBullishTimeframe,
-    mtfLatestFlipCandleTime: mtf.latestFlipCandleTime,
+    mtfLatestFlippedBullish: latestFlippedTf,
+    mtfLatestFlipCandleTime: latestFlipTime,
 
     status: decision === 'accept' ? 'new' : 'monitor',
     price: currentPrice,
