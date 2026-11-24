@@ -7,8 +7,6 @@ const TF_MS = {
   '60': 60 * 60 * 1000,
   '240': 4 * 60 * 60 * 1000
 };
-
-// Only allow open-candle flip triggers within the first 15 seconds of candle open
 const CANDLE_OPEN_WINDOW_MS = 15 * 1000;
 
 function getHistogram(candles) {
@@ -20,26 +18,6 @@ function getHistogram(candles) {
   return Number.isFinite(value) ? value : null;
 }
 
-function getOpenPriceHistogram(candles) {
-  if (!Array.isArray(candles) || candles.length < 26) {
-    return null;
-  }
-
-  const last = candles[candles.length - 1];
-  const openPrice = Number(last?.open ?? 0);
-  if (!Number.isFinite(openPrice) || openPrice <= 0) {
-    return null;
-  }
-
-  const atOpenCandles = [
-    ...candles.slice(0, -1),
-    { ...last, close: openPrice }
-  ];
-
-  const value = Number(macdHistogram(atOpenCandles));
-  return Number.isFinite(value) ? value : null;
-}
-
 function getLastCandleTime(candles) {
   if (!Array.isArray(candles) || candles.length === 0) return null;
   const last = candles[candles.length - 1];
@@ -47,16 +25,29 @@ function getLastCandleTime(candles) {
   return Number.isFinite(time) && time > 0 ? time : null;
 }
 
-function isAtCandleOpen(candleOpenTime, timeframe, nowMs = Date.now()) {
+function isAtOpenPriceFlip(candles, timeframe, nowMs = Date.now()) {
   const intervalMs = TF_MS[String(timeframe)];
-  if (!intervalMs || !Number.isFinite(candleOpenTime) || candleOpenTime <= 0) {
+  const lastCandle = candles[candles.length - 1];
+  const candleTime = getLastCandleTime(candles);
+  const openPrice = Number(lastCandle?.open ?? 0);
+
+  if (!intervalMs || !candleTime || !Number.isFinite(openPrice) || openPrice <= 0) {
     return false;
   }
-  const currentBucketStart = Math.floor(nowMs / intervalMs) * intervalMs;
-  if (candleOpenTime !== currentBucketStart) return false;
 
-  const elapsedMs = nowMs - candleOpenTime;
-  return elapsedMs >= 0 && elapsedMs <= CANDLE_OPEN_WINDOW_MS;
+  // Must be within the opening window of the current active candle
+  const bucketStart = Math.floor(nowMs / intervalMs) * intervalMs;
+  if (candleTime !== bucketStart || nowMs - candleTime > CANDLE_OPEN_WINDOW_MS) {
+    return false;
+  }
+
+  // Evaluate MACD histogram strictly at the candle's OPEN price
+  const openHistogram = getHistogram([
+    ...candles.slice(0, -1),
+    { ...lastCandle, close: openPrice }
+  ]);
+
+  return openHistogram !== null && openHistogram > 0;
 }
 
 function directionFromHistogram(histogram) {
@@ -80,32 +71,28 @@ function evaluateMtfAlignment(candlesByTf = {}, nowMs = Date.now()) {
       : [];
 
     const currentHistogram = getHistogram(candles);
-    const openPriceHistogram = getOpenPriceHistogram(candles);
     const previousHistogram = candles.length >= 27
       ? getHistogram(candles.slice(0, -1))
       : null;
 
-    const currentDirection = directionFromHistogram(currentHistogram);
-    const previousDirection = directionFromHistogram(previousHistogram);
-
-    values[timeframe] = currentDirection;
-    previousValues[timeframe] = previousDirection;
+    values[timeframe] = directionFromHistogram(currentHistogram);
+    previousValues[timeframe] = directionFromHistogram(previousHistogram);
     histogramValues[timeframe] = currentHistogram;
     previousHistogramValues[timeframe] = previousHistogram;
 
-    const lastCandleTime = getLastCandleTime(candles);
-
+    // Strict rule:
+    // 1. Previous closed candle histogram negative (< 0)
+    // 2. Current live histogram positive (> 0)
+    // 3. Flip occurred precisely at the open price of the current candle
     if (
       previousHistogram !== null &&
       previousHistogram < 0 &&
-      openPriceHistogram !== null &&
-      openPriceHistogram > 0 &&
       currentHistogram !== null &&
       currentHistogram > 0 &&
-      isAtCandleOpen(lastCandleTime, timeframe, nowMs)
+      isAtOpenPriceFlip(candles, timeframe, nowMs)
     ) {
       flippedBullish.push(timeframe);
-      flipCandleTimes[timeframe] = lastCandleTime;
+      flipCandleTimes[timeframe] = getLastCandleTime(candles);
     }
   }
 
