@@ -96,6 +96,11 @@ function dailySignalKey(signal) {
 }
 
 function persistentNotificationKey(type, signal) {
+  if (type === ALIGNMENT_PREFIX) {
+    const flipTf = signal.mtfLatestFlippedBullish || 'none';
+    const flipTime = Number(signal.mtfLatestFlipCandleTime || signal.dailyCandleTime || 0);
+    return `${type}:${dailySignalKey(signal)}:${flipTf}:${flipTime}`;
+  }
   return `${type}:${dailySignalKey(signal)}`;
 }
 
@@ -178,22 +183,24 @@ function alertData(signal, marketData) {
 function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
-  // 1. Immediate alert: all MTF TFs confirmed positive upon 1D root discovery
-  const immediateAlert =
-    rootDiscovered === true &&
-    signal.mtfAligned === true &&
-    signal.mtfStatus === 'bullish';
-
-  // 2. Delayed alert: root already discovered while some MTF TFs were negative;
-  // fires on the exact open candle where the last negative MTF TF flips positive
-  // after closing red, making all MTF TFs positive.
-  const delayedAlert =
-    rootDiscovered === false &&
+  // 1. Sub-TF completion: all MTF TFs are bullish and the last non-aligned TF
+  // just flipped positive at its open candle open price after closing red.
+  const subTfCompletion =
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish' &&
-    signal.mtfAlignmentFlip === true;
+    signal.mtfAlignmentFlip === true &&
+    Boolean(signal.mtfLatestFlippedBullish);
 
-  return immediateAlert || delayedAlert;
+  // 2. 1D root flip completion: all 4 sub-TFs were already bullish when the 1D
+  // open-candle histogram flipped positive at candle open price.
+  const dailyRootFlipCompletion =
+    rootDiscovered === true &&
+    signal.macdFlip === true &&
+    signal.mtfAligned === true &&
+    signal.mtfStatus === 'bullish' &&
+    Boolean(signal.mtfLatestFlippedBullish);
+
+  return subTfCompletion || dailyRootFlipCompletion;
 }
 
 async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = false) {
@@ -253,7 +260,7 @@ async function flushTradeCandidateQueue() {
     try {
       if (await notificationWasSent(key)) continue;
 
-      if (await countOpenTrades() >= Number(config.MAX_OPEN_TRADES || 3)) {
+      if ((await countOpenTrades()) >= Number(config.MAX_OPEN_TRADES || 3)) {
         break;
       }
 
@@ -714,9 +721,13 @@ async function drainDeferredSymbols() {
 }
 
 function resolveBoundaryScanTimeframe() {
-  const configuredMs = Number(config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000);
+  const configuredMs = Number(
+    config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000
+  );
 
-  const exact = Object.entries(BYBIT_TF_MS).find(([, ms]) => ms === configuredMs);
+  const exact = Object.entries(BYBIT_TF_MS).find(
+    ([, ms]) => ms === configuredMs
+  );
   if (exact) return exact[0];
 
   const sorted = Object.entries(BYBIT_TF_MS).sort((a, b) => a[1] - b[1]);
@@ -785,11 +796,7 @@ async function syncOpenTradesFromMarket() {
       const currentPrice = Number(marketData.lastPrice || 0);
 
       if (currentPrice > 0) {
-        await updateTradeFromMarket(
-          trade.symbol,
-          currentPrice,
-          dailyCandles
-        );
+        await updateTradeFromMarket(trade.symbol, currentPrice, dailyCandles);
       }
     } catch (error) {
       console.error(
