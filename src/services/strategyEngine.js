@@ -53,6 +53,7 @@ const RECOMMENDATION_PREFIX = 'recommendation';
 const MARKET_DATA_CACHE_TTL_MS = 1000;
 const EVALUATION_DEBOUNCE_MS = 300;
 const TRADE_RANKING_WINDOW_MS = 1000;
+const BOUNDARY_SETTLE_BUFFER_MS = 1500;
 
 let bootstrapped = false;
 let startupReady = false;
@@ -98,7 +99,9 @@ function dailySignalKey(signal) {
 function persistentNotificationKey(type, signal) {
   if (type === ALIGNMENT_PREFIX) {
     const flipTf = signal.mtfLatestFlippedBullish || 'none';
-    const flipTime = Number(signal.mtfLatestFlipCandleTime || signal.dailyCandleTime || 0);
+    const flipTime = Number(
+      signal.mtfLatestFlipCandleTime || signal.dailyCandleTime || 0
+    );
     return `${type}:${dailySignalKey(signal)}:${flipTf}:${flipTime}`;
   }
   return `${type}:${dailySignalKey(signal)}`;
@@ -183,24 +186,24 @@ function alertData(signal, marketData) {
 function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
-  // 1. Sub-TF completion: all MTF TFs are bullish and the last non-aligned TF
-  // just flipped positive at its open candle open price after closing red.
+  // 1. Sub-TF completion: 1D root was already active and the final negative sub-TF
+  // just flipped positive at its candle open price, completing [5m, 15m, 1h, 4h].
   const subTfCompletion =
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish' &&
     signal.mtfAlignmentFlip === true &&
     Boolean(signal.mtfLatestFlippedBullish);
 
-  // 2. 1D root flip completion: all 4 sub-TFs were already bullish when the 1D
-  // open-candle histogram flipped positive at candle open price.
-  const dailyRootFlipCompletion =
+  // 2. 1D root completion: all 4 sub-TFs were already bullish when 1D newly qualified
+  // (either via 1D open-candle MACD flip OR 1D crossing above 7MA).
+  const dailyRootCompletion =
     rootDiscovered === true &&
-    signal.macdFlip === true &&
+    (signal.macdFlip === true || signal.openAboveMa7 === true) &&
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish' &&
     Boolean(signal.mtfLatestFlippedBullish);
 
-  return subTfCompletion || dailyRootFlipCompletion;
+  return subTfCompletion || dailyRootCompletion;
 }
 
 async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = false) {
@@ -744,11 +747,11 @@ function nextWallClockBoundaryDelayMs(timeframe = '15') {
   const remainder = now % intervalMs;
 
   if (remainder === 0) {
-    return intervalMs;
+    return intervalMs + BOUNDARY_SETTLE_BUFFER_MS;
   }
 
   const nextBoundary = now + (intervalMs - remainder);
-  return Math.max(250, nextBoundary - now);
+  return Math.max(250, nextBoundary - now + BOUNDARY_SETTLE_BUFFER_MS);
 }
 
 function scheduleNextBoundary() {
