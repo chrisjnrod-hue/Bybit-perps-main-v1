@@ -11,6 +11,8 @@ const {
   CONFIG: liquidityConfig
 } = require('./liquidityGuard');
 
+const lastMtfSnapshots = new Map();
+
 function getCurrentPrice(ticker, latestDailyCandle) {
   const tickerPrice = Number(ticker?.lastPrice || ticker?.last || 0);
   if (tickerPrice > 0) return tickerPrice;
@@ -77,8 +79,8 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
   const rootCriteria = evaluateDailyRootCriteria(daily, { ...ticker, symbol });
 
-  // Must strictly satisfy the exact same 1D root criteria on every evaluation
   if (!rootCriteria) {
+    lastMtfSnapshots.delete(symbol);
     return null;
   }
 
@@ -101,11 +103,21 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
         ? 'negative'
         : 'neutral';
 
-  const mtf = evaluateMtfAlignment({
-    '5': candlesByTf['5'] || [],
-    '15': candlesByTf['15'] || [],
-    '60': candlesByTf['60'] || [],
-    '240': candlesByTf['240'] || []
+  const prevSnapshot = lastMtfSnapshots.get(symbol) || null;
+  const mtf = evaluateMtfAlignment(
+    {
+      '5': candlesByTf['5'] || [],
+      '15': candlesByTf['15'] || [],
+      '60': candlesByTf['60'] || [],
+      '240': candlesByTf['240'] || []
+    },
+    prevSnapshot
+  );
+
+  lastMtfSnapshots.set(symbol, {
+    aligned: mtf.aligned,
+    values: { ...mtf.values },
+    candleTimes: { ...mtf.candleTimes }
   });
 
   let liquidity = {
@@ -155,30 +167,30 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   };
 
   try {
-    const tvTimeoutMs = Math.max(
-      1000,
-      Number(config.TRADINGVIEW_TIMEOUT_MS || 4000)
-    );
-    tvRating = await Promise.race([
-      getTradingViewRating(symbol),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('TradingView timeout')), tvTimeoutMs)
-      )
-    ]);
+    tvRating = await getTradingViewRating(symbol);
   } catch (error) {
     console.warn(
       `[signalManager] TradingView rating lookup skipped for ${symbol}: ${error.message}`
     );
   }
 
+  const numericTvScore = Number(tvRating?.score);
+  const numericTvPercent = Number(tvRating?.percent);
+  const tvAvailable =
+    tvRating?.available === true && Number.isFinite(numericTvScore);
+
   const previousState = await getMtfState(symbol, 'D');
   const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
 
+  const dailyRootTriggered = positiveFlip || openAndPriceAboveMa7;
+  const dailyFlipLabel = positiveFlip ? '1D' : '1D (7MA)';
+
   const latestFlippedTf =
-    mtf.latestFlippedBullishTimeframe || (positiveFlip ? '1D' : null);
+    mtf.latestFlippedBullishTimeframe ||
+    (dailyRootTriggered ? dailyFlipLabel : null);
   const latestFlipTime =
     mtf.latestFlipCandleTime ||
-    (positiveFlip ? Number(latestDailyCandle?.open_time || 0) || null : null);
+    (dailyRootTriggered ? Number(latestDailyCandle?.open_time || 0) || null : null);
 
   const signal = {
     symbol,
@@ -196,10 +208,11 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     customScore: customRating.score,
     customScoreLabel: customRating.label,
 
-    tvScore: tvRating.available ? tvRating.score : null,
-    tvScorePercent: tvRating.available ? tvRating.percent : null,
-    tvScoreLabel: tvRating.label || 'N/A',
-    tvScoreAvailable: Boolean(tvRating.available),
+    tvScore: tvAvailable ? numericTvScore : null,
+    tvScorePercent:
+      tvAvailable && Number.isFinite(numericTvPercent) ? numericTvPercent : null,
+    tvScoreLabel: tvAvailable ? tvRating.label || 'unrated' : 'N/A',
+    tvScoreAvailable: tvAvailable,
 
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
@@ -209,6 +222,7 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     mtfAligned: mtf.aligned,
     mtfAlignmentFlip: mtf.alignmentFlip,
     mtfFlippedBullish: mtf.flippedBullish,
+    latestFlippedBullishTimeframe: latestFlippedTf,
     mtfLatestFlippedBullish: latestFlippedTf,
     mtfLatestFlipCandleTime: latestFlipTime,
 
