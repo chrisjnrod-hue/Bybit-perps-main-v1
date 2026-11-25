@@ -18,48 +18,67 @@ function isEnabled(value) {
   return Boolean(value);
 }
 
-async function fetchTvAnalysisForTicker(
-  getTechnicalAnalysis,
-  tvSymbol,
-  exchange,
-  interval
-) {
-  const analysis =
-    (await getTechnicalAnalysis({
-      symbol: tvSymbol,
-      interval,
-      screener: 'crypto',
-      exchange
-    }).catch(() => null)) ??
-    (await getTechnicalAnalysis({
-      symbol: tvSymbol,
-      interval
-    }).catch(() => null));
+function mapIntervalSuffix(interval) {
+  const raw = String(interval || '1D').trim().toUpperCase();
+  if (raw === '1D' || raw === 'D' || raw === '24H') return '';
+  if (raw === '4H' || raw === '240') return '|240';
+  if (raw === '1H' || raw === '60') return '|60';
+  if (raw === '15M' || raw === '15') return '|15';
+  if (raw === '5M' || raw === '5') return '|5';
+  return '';
+}
 
-  if (!analysis) return null;
+async function queryTradingViewScanner(tickers, intervalSuffix) {
+  const recommendField = `Recommend.All${intervalSuffix}`;
+  const endpoint =
+    String(config.TRADINGVIEW_RATING_ENDPOINT || '').trim() ||
+    'https://scanner.tradingview.com/crypto/scan';
+  const timeoutMs = Math.max(
+    1000,
+    Number(config.TRADINGVIEW_RATING_TIMEOUT_MS || 5000)
+  );
 
-  const rawRecommendation =
-    analysis?.recommendation?.value ??
-    analysis?.summary?.RECOMMENDATION ??
-    analysis?.RECOMMENDATION ??
-    analysis?.compute?.RECOMMENDATION ??
-    analysis?.value ??
-    analysis?.indicators?.['Recommend.All'];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (typeof rawRecommendation === 'number' && Number.isFinite(rawRecommendation)) {
-    return Math.max(-1, Math.min(1, rawRecommendation));
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0'
+      },
+      body: JSON.stringify({
+        symbols: {
+          tickers,
+          query: { types: [] }
+        },
+        columns: [recommendField]
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload?.data) ? payload.data : [];
+
+    for (const ticker of tickers) {
+      const match = rows.find(
+        (row) => String(row?.s || '').toUpperCase() === ticker.toUpperCase()
+      );
+      const val = match?.d?.[0];
+      if (typeof val === 'number' && Number.isFinite(val)) {
+        return Math.max(-1, Math.min(1, val));
+      }
+    }
+
+    return null;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  if (typeof rawRecommendation === 'string') {
-    const lower = rawRecommendation.toLowerCase();
-    if (lower.includes('strong_buy') || lower.includes('strong buy')) return 1.0;
-    if (lower.includes('buy')) return 0.5;
-    if (lower.includes('strong_sell') || lower.includes('strong sell')) return -1.0;
-    if (lower.includes('sell')) return -0.5;
-    if (lower.includes('neutral')) return 0.0;
-  }
-
-  return null;
 }
 
 async function getTradingViewRating(symbol) {
@@ -96,31 +115,24 @@ async function getTradingViewRating(symbol) {
   }
 
   try {
-    const interval = String(config.TRADINGVIEW_RATING_INTERVAL || '1D');
+    const intervalSuffix = mapIntervalSuffix(
+      config.TRADINGVIEW_RATING_INTERVAL || '1D'
+    );
 
-    const tvModule = await import('@mathieuc/tradingview/data');
-    const getTechnicalAnalysis = tvModule.getTechnicalAnalysis;
-
-    const candidates = cleanSymbol.includes(':')
-      ? [{ tvSymbol: cleanSymbol, exchange: cleanSymbol.split(':')[0] }]
+    const tickers = cleanSymbol.includes(':')
+      ? [cleanSymbol]
       : [
-          { tvSymbol: `BYBIT:${cleanSymbol}.P`, exchange: 'BYBIT' },
-          { tvSymbol: `BYBIT:${cleanSymbol}`, exchange: 'BYBIT' },
-          { tvSymbol: `BINANCE:${cleanSymbol}`, exchange: 'BINANCE' }
+          `BYBIT:${cleanSymbol}.P`,
+          `BYBIT:${cleanSymbol}`,
+          `BINANCE:${cleanSymbol}`
         ];
 
-    let score = null;
-    for (const candidate of candidates) {
-      score = await fetchTvAnalysisForTicker(
-        getTechnicalAnalysis,
-        candidate.tvSymbol,
-        candidate.exchange,
-        interval
-      );
-      if (score !== null) break;
-    }
+    const score = await queryTradingViewScanner(tickers, intervalSuffix);
 
     if (score === null) {
+      console.warn(
+        `[tradingviewRating] No Recommend.All data returned for ${tickers.join(', ')}`
+      );
       return {
         available: false,
         score: null,
@@ -146,7 +158,7 @@ async function getTradingViewRating(symbol) {
     return rating;
   } catch (error) {
     console.error(
-      `[tradingviewRating] Request failed for ${cleanSymbol}:`,
+      `[tradingviewRating] Scanner request failed for ${cleanSymbol}:`,
       error.message
     );
 
