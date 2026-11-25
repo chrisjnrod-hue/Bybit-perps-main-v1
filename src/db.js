@@ -12,6 +12,23 @@ pool.on('error', (err) => {
   console.error('Unexpected PostgreSQL pool error:', err);
 });
 
+let schemaMigrated = false;
+
+async function ensureSignalFloatColumns() {
+  if (schemaMigrated) return;
+  try {
+    await pool.query(`
+      ALTER TABLE signals
+        ALTER COLUMN tv_score TYPE DOUBLE PRECISION USING tv_score::DOUBLE PRECISION,
+        ALTER COLUMN custom_score TYPE DOUBLE PRECISION USING custom_score::DOUBLE PRECISION;
+    `);
+    schemaMigrated = true;
+  } catch (err) {
+    console.warn('[db] Signal column migration skipped or already applied:', err.message);
+    schemaMigrated = true;
+  }
+}
+
 async function query(text, params = []) {
   return pool.query(text, params);
 }
@@ -211,6 +228,8 @@ async function hasRecentSignal(symbol, dailyCandleTime, reason, windowMinutes = 
 }
 
 async function recordSignal(signal) {
+  await ensureSignalFloatColumns();
+
   await pool.query(
     `
     INSERT INTO signals (
@@ -315,9 +334,6 @@ async function purgeStaleCache() {
   const scanRunsCutoff =
     now - Number(config.SCAN_RUNS_RETENTION_MS || 30 * 24 * 60 * 60 * 1000);
 
-  // Retain the newest 200 candles for each symbol/timeframe because indicators
-  // require historical candles. This bounds table growth without removing
-  // the history needed by the strategy.
   await pool.query(`
     WITH ranked AS (
       SELECT ctid,
