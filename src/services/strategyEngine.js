@@ -186,16 +186,12 @@ function alertData(signal, marketData) {
 function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
   if (!signal || !signal.symbol) return false;
 
-  // 1. Sub-TF completion: 1D root was already active and the final negative sub-TF
-  // just flipped positive at its candle open price, completing [5m, 15m, 1h, 4h].
   const subTfCompletion =
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish' &&
     signal.mtfAlignmentFlip === true &&
     Boolean(signal.mtfLatestFlippedBullish);
 
-  // 2. 1D root completion: all 4 sub-TFs were already bullish when 1D newly qualified
-  // (either via 1D open-candle MACD flip OR 1D crossing above 7MA).
   const dailyRootCompletion =
     rootDiscovered === true &&
     (signal.macdFlip === true || signal.openAboveMa7 === true) &&
@@ -337,7 +333,6 @@ async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
     activeRoot = null;
   }
 
-  // If the symbol no longer meets the 1D root criteria, drop it from active monitoring
   if (!detectedRoot) {
     if (activeRoot) {
       activeRoots.delete(symbol);
@@ -444,6 +439,9 @@ async function handleKline(msg) {
 
   try {
     await saveKline(details.symbol, details.timeframe, candle);
+    if (details.timeframe === 'D') {
+      marketDataCache.delete(details.symbol);
+    }
     scheduleSymbolEvaluation(details.symbol);
 
     if (details.timeframe === 'D') {
@@ -489,8 +487,7 @@ function handleMarketUpdate(symbol) {
 }
 
 async function discoverSymbols() {
-  let instruments = await fetchAllSymbols();
-
+  const instruments = await fetchAllSymbols();
   const selected = filterUsdtPerpetualSymbols(instruments);
 
   const instrumentBySymbol = new Map(
@@ -698,7 +695,6 @@ async function runBoundaryScan() {
   batchScanRunning = true;
 
   try {
-    // Force fresh market data evaluation at boundary scan
     marketDataCache.clear();
     const roots = await collectCurrentRoots([...symbols]);
     await sendRootSummary(roots, 'boundary');
@@ -884,3 +880,4 @@ module.exports = {
   syncOpenTradesFromMarket,
   runBoundaryScan
 };
+```[cite: 2]
