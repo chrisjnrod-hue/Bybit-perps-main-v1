@@ -169,4 +169,3 @@ module.exports = {
   evaluateMtfAlignment,
   REQUIRED_MTF_TFS
 };
-```[cite: 5]
