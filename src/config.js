@@ -48,6 +48,12 @@ function envString(name, defaultValue) {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_BOUNDARY_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 
+const resolvedMinTvScore =
+  typeof process.env.MIN_TV_SCORE !== 'undefined' &&
+  String(process.env.MIN_TV_SCORE).trim() !== ''
+    ? envFloat('MIN_TV_SCORE', 0.49)
+    : envFloat('MIN_TV_RATING', 0.49);
+
 module.exports = {
   BYBIT_REST_BASE: envString('BYBIT_REST_BASE', 'https://api.bybit.com'),
   BYBIT_WS_PUBLIC: envString(
@@ -99,8 +105,8 @@ module.exports = {
   BREAK_EVEN_PERCENT: envFloat('BREAK_EVEN_PERCENT', 0.5),
   TRAILING_LOOKBACK: envInt('TRAILING_LOOKBACK', 3),
 
-  MIN_TV_RATING: envFloat('MIN_TV_RATING', 0.6),
-  MIN_TV_SCORE: envFloat('MIN_TV_SCORE', 0.6),
+  MIN_TV_RATING: resolvedMinTvScore,
+  MIN_TV_SCORE: resolvedMinTvScore,
   MIN_CUSTOM_SCORE: envFloat('MIN_CUSTOM_SCORE', 65),
   MAX_CONSECUTIVE_ROOT_SIGNALS_1D: envInt(
     'MAX_CONSECUTIVE_ROOT_SIGNALS_1D',
