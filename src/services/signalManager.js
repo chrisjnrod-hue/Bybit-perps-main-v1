@@ -254,4 +254,3 @@ module.exports = {
   evaluateSignal,
   detectDailyRootSignal
 };
-```[cite: 3]
