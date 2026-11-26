@@ -880,4 +880,3 @@ module.exports = {
   syncOpenTradesFromMarket,
   runBoundaryScan
 };
-```[cite: 2]
