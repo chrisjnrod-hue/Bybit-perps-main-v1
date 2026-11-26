@@ -22,11 +22,12 @@ function getCurrentPrice(ticker, latestDailyCandle) {
 
 function detectStrictBullishDailyFlip(daily = []) {
   if (!Array.isArray(daily) || daily.length < 27) return false;
-  const { histogram } = macdSeries(daily, { useOpenForLastCandle: true });
+  const series = macdSeries(daily, { useOpenForLastCandle: true });
+  const histogram = Array.isArray(series?.histogram) ? series.histogram : [];
   if (histogram.length < 2) return false;
 
-  const prev = histogram[histogram.length - 2];
-  const curr = histogram[histogram.length - 1];
+  const prev = Number(histogram[histogram.length - 2]);
+  const curr = Number(histogram[histogram.length - 1]);
 
   return Number.isFinite(prev) && Number.isFinite(curr) && prev < 0 && curr > 0;
 }
@@ -35,11 +36,11 @@ function evaluateDailyRootCriteria(daily = [], ticker = {}) {
   if (!Array.isArray(daily) || daily.length < 8) return null;
 
   const latest = daily[daily.length - 1];
-  const currentOpen = Number(latest?.open || 0);
+  const currentOpen = Number(latest?.open ?? latest?.o ?? 0);
   const currentPrice = getCurrentPrice(ticker, latest);
   const recentCloses = daily
     .slice(-8, -1)
-    .map((candle) => Number(candle.close || 0));
+    .map((candle) => Number(candle?.close ?? candle?.c ?? 0));
 
   if (recentCloses.length < 7 || currentOpen <= 0 || currentPrice <= 0) {
     return null;
@@ -61,7 +62,8 @@ function evaluateDailyRootCriteria(daily = [], ticker = {}) {
 
   return {
     symbol: ticker.symbol || null,
-    dailyCandleTime: Number(latest?.open_time || 0) || null,
+    dailyCandleTime:
+      Number(latest?.open_time || latest?.start || latest?.t || 0) || null,
     currentOpen,
     currentPrice,
     ma7,
@@ -93,13 +95,13 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     reason
   } = rootCriteria;
 
-  const currentDailyHistogram = macdHistogram(daily, {
-    useOpenForLastCandle: true
-  });
+  const currentDailyHistogram = Number(
+    macdHistogram(daily, { useOpenForLastCandle: true })
+  );
   const dailyHistogramDirection =
-    currentDailyHistogram > 0
+    Number.isFinite(currentDailyHistogram) && currentDailyHistogram > 0
       ? 'bullish'
-      : currentDailyHistogram < 0
+      : Number.isFinite(currentDailyHistogram) && currentDailyHistogram < 0
         ? 'negative'
         : 'neutral';
 
@@ -117,7 +119,8 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   lastMtfSnapshots.set(symbol, {
     aligned: mtf.aligned,
     values: { ...mtf.values },
-    candleTimes: { ...mtf.candleTimes }
+    candleTimes: { ...mtf.candleTimes },
+    flipCandleTimes: { ...mtf.flipCandleTimes }
   });
 
   let liquidity = {
@@ -190,16 +193,21 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     (dailyRootTriggered ? dailyFlipLabel : null);
   const latestFlipTime =
     mtf.latestFlipCandleTime ||
-    (dailyRootTriggered ? Number(latestDailyCandle?.open_time || 0) || null : null);
+    (dailyRootTriggered
+      ? Number(latestDailyCandle?.open_time || latestDailyCandle?.start || 0) || null
+      : null);
 
   const signal = {
     symbol,
     timeframe: 'D',
-    dailyCandleTime: Number(latestDailyCandle?.open_time || 0) || null,
+    dailyCandleTime:
+      Number(latestDailyCandle?.open_time || latestDailyCandle?.start || 0) || null,
     decision,
     reason,
 
-    dailyHistogram: currentDailyHistogram,
+    dailyHistogram: Number.isFinite(currentDailyHistogram)
+      ? currentDailyHistogram
+      : 0,
     dailyHistogramDirection,
     macdFlip: positiveFlip,
     openAboveMa7: openAndPriceAboveMa7,
@@ -246,3 +254,4 @@ module.exports = {
   evaluateSignal,
   detectDailyRootSignal
 };
+```[cite: 3]
