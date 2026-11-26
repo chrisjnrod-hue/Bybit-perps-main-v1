@@ -173,7 +173,7 @@ module.exports = {
 
 ---
 
-### 2. Fully Updated `config.js`
+### `config.js`
 
 ```js
 require('dotenv').config();
@@ -350,9 +350,3 @@ module.exports = {
   SCAN_RUNS_RETENTION_MS: envInt('SCAN_RUNS_RETENTION_MS', 30 * DAY_MS)
 };
 ```[cite: 7]
-
-In your `.env` file, set:
-
-```env
-MIN_TV_SCORE=0.49
-MIN_TV_RATING=0.49
