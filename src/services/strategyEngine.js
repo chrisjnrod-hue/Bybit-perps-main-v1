@@ -34,8 +34,7 @@ const {
   updateTradeFromMarket
 } = require('./openTradeTracker');
 
-const { sendTelegramMessage } =
-  require('./telegram');
+const { sendTelegramMessage } = require('./telegram');
 
 const {
   formatSummaryTelegramChunks,
@@ -43,17 +42,11 @@ const {
   formatRecommendationTelegram
 } = require('./telegramFormatter');
 
-const { buildMarketData } =
-  require('./marketData');
+const { buildMarketData } = require('./marketData');
+const { setupKeepAlive } = require('./keepalive');
 
-const { setupKeepAlive } =
-  require('./keepalive');
-
-const TIMEFRAMES =
-  ['5', '15', '60', '240', 'D'];
-
-const MTF_TIMEFRAMES =
-  ['5', '15', '60', '240'];
+const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
+const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
 
 const BYBIT_TF_MS = {
   '5': 5 * 60 * 1000,
@@ -91,21 +84,17 @@ const activeRoots = new Map();
 const evaluatingSymbols = new Set();
 
 function delay(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
-  );
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isBoundaryScanEnabled() {
-  if (
-    typeof config.ENABLE_BOUNDARY_SCAN === 'boolean'
-  ) {
+  if (typeof config.ENABLE_BOUNDARY_SCAN === 'boolean') {
     return config.ENABLE_BOUNDARY_SCAN;
   }
 
-  return String(
-    config.ENABLE_BOUNDARY_SCAN || ''
-  ).trim().toLowerCase() === 'true';
+  return String(config.ENABLE_BOUNDARY_SCAN || '')
+    .trim()
+    .toLowerCase() === 'true';
 }
 
 function hasLiveAccountConfig() {
@@ -118,9 +107,7 @@ function hasLiveAccountConfig() {
 }
 
 function dailySignalKey(signal) {
-  return `${signal.symbol}:${Number(
-    signal.dailyCandleTime || 0
-  )}`;
+  return `${signal.symbol}:${Number(signal.dailyCandleTime || 0)}`;
 }
 
 function persistentNotificationKey(type, signal) {
@@ -131,15 +118,13 @@ function persistentNotificationKey(type, signal) {
 
     const flipTime = Number(
       signal.mtfLatestFlipCandleTime ||
-      signal.dailyCandleTime ||
       0
     );
 
-    const flipOpenPrice =
-      Number(
-        signal.mtfLatestFlipOpenPrice ||
-        0
-      );
+    const flipOpenPrice = Number(
+      signal.mtfLatestFlipOpenPrice ||
+      0
+    );
 
     return [
       type,
@@ -176,9 +161,7 @@ async function getMarketDataCached(symbol) {
     return cached.data;
   }
 
-  const data =
-    await buildMarketData(symbol);
-
+  const data = await buildMarketData(symbol);
   marketDataCache.set(symbol, {
     cachedAt: Date.now(),
     data
@@ -196,8 +179,7 @@ async function getCandles(symbol, timeframe) {
 }
 
 async function getDailyRoot(symbol) {
-  const dailyCandles =
-    await getCandles(symbol, 'D');
+  const dailyCandles = await getCandles(symbol, 'D');
 
   if (
     !Array.isArray(dailyCandles) ||
@@ -206,24 +188,16 @@ async function getDailyRoot(symbol) {
     return null;
   }
 
-  const marketData =
-    await getMarketDataCached(symbol);
-
-  const root = detectDailyRootSignal(
-    dailyCandles,
-    {
-      symbol,
-      lastPrice: marketData.lastPrice
-    }
-  );
+  const marketData = await getMarketDataCached(symbol);
+  const root = detectDailyRootSignal(dailyCandles, {
+    symbol,
+    lastPrice: marketData.lastPrice
+  });
 
   if (!root) return null;
 
   return {
-    root: {
-      ...root,
-      symbol
-    },
+    root: { ...root, symbol },
     dailyCandles,
     marketData
   };
@@ -236,15 +210,11 @@ function alertData(signal, marketData) {
     decision: signal.decision,
     reason: signal.reason,
     customScore: signal.customScore,
-    customScoreLabel:
-      signal.customScoreLabel,
+    customScoreLabel: signal.customScoreLabel,
     tvScore: signal.tvScore,
-    tvScorePercent:
-      signal.tvScorePercent,
-    tvScoreLabel:
-      signal.tvScoreLabel,
-    tvScoreAvailable:
-      signal.tvScoreAvailable,
+    tvScorePercent: signal.tvScorePercent,
+    tvScoreLabel: signal.tvScoreLabel,
+    tvScoreAvailable: signal.tvScoreAvailable,
     mtfStatus: signal.mtfStatus,
     mtfValues: signal.mtfValues,
     mtfLatestFlippedBullish:
@@ -273,10 +243,7 @@ function alertData(signal, marketData) {
     trailingStop:
       'higher_lows or close below 14MA',
     takeProfit:
-      `${Number(
-        config.DEFAULT_TP_PERCENT ||
-        3
-      )}%`,
+      `${Number(config.DEFAULT_TP_PERCENT || 3)}%`,
     action:
       signal.decision === 'accept'
         ? 'open'
@@ -288,33 +255,23 @@ function shouldEmitMtfAlignmentAlert(
   signal,
   rootDiscovered = false
 ) {
-  if (!signal || !signal.symbol) {
-    return false;
-  }
+  if (!signal?.symbol) return false;
 
-  const subTfCompletion =
+  const aligned =
     signal.mtfAligned === true &&
-    signal.mtfStatus === 'bullish' &&
-    signal.mtfAlignmentFlip === true &&
-    Boolean(
-      signal.mtfLatestFlippedBullish
-    );
+    signal.mtfStatus === 'bullish';
 
-  const dailyRootCompletion =
-    rootDiscovered === true &&
-    (
-      signal.macdFlip === true ||
-      signal.openAboveMa7 === true
-    ) &&
-    signal.mtfAligned === true &&
-    signal.mtfStatus === 'bullish' &&
-    Boolean(
-      signal.mtfLatestFlippedBullish
-    );
+  if (!aligned) return false;
 
+  // 1D discovery alert.
+  if (rootDiscovered) return true;
+
+  // Later completed cycle: require a real candle-level completing flip.
   return (
-    subTfCompletion ||
-    dailyRootCompletion
+    signal.mtfAlignmentFlip === true &&
+    Boolean(signal.mtfLatestFlippedBullish) &&
+    Number(signal.mtfLatestFlipCandleTime) > 0 &&
+    Number(signal.mtfLatestFlipOpenPrice) > 0
   );
 }
 
@@ -338,22 +295,19 @@ async function maybeSendAlignmentAlert(
       signal
     );
 
-  if (
-    await notificationWasSent(key)
-  ) {
+  if (await notificationWasSent(key)) {
     return false;
   }
 
-  const result =
-    await sendTelegramBlock(
-      formatMtfAlignmentAlert(
-        alertData(
-          signal,
-          marketData
-        )
-      ),
-      key
-    );
+  const result = await sendTelegramBlock(
+    formatMtfAlignmentAlert(
+      alertData(
+        signal,
+        marketData
+      )
+    ),
+    key
+  );
 
   if (!result) return false;
 
@@ -367,10 +321,7 @@ async function maybeSendAlignmentAlert(
   return true;
 }
 
-function queueTradeCandidate(
-  signal,
-  marketData
-) {
+function queueTradeCandidate(signal, marketData) {
   const market = {
     volume24hUsd: Number(
       marketData?.volume24hUsd ||
@@ -391,9 +342,7 @@ function queueTradeCandidate(
 
   if (!eligibility.open) return;
 
-  const key =
-    dailySignalKey(signal);
-
+  const key = dailySignalKey(signal);
   tradeCandidates.set(key, {
     signal,
     marketData,
@@ -417,11 +366,7 @@ async function flushTradeCandidateQueue() {
   tradeCandidates.clear();
 
   for (const candidate of candidates) {
-    const {
-      signal,
-      market
-    } = candidate;
-
+    const { signal, market } = candidate;
     const key =
       persistentNotificationKey(
         RECOMMENDATION_PREFIX,
@@ -429,37 +374,24 @@ async function flushTradeCandidateQueue() {
       );
 
     try {
-      if (
-        await notificationWasSent(key)
-      ) {
+      if (await notificationWasSent(key)) {
         continue;
       }
 
       if (
         (await countOpenTrades()) >=
-        Number(
-          config.MAX_OPEN_TRADES ||
-          3
-        )
+        Number(config.MAX_OPEN_TRADES || 3)
       ) {
         break;
       }
 
       const eligibility =
-        shouldOpenTrade(
-          signal,
-          market
-        );
+        shouldOpenTrade(signal, market);
 
-      if (!eligibility.open) {
-        continue;
-      }
+      if (!eligibility.open) continue;
 
       const plan =
-        buildTradePlan(
-          signal,
-          market
-        );
+        buildTradePlan(signal, market);
 
       const savedTrade =
         await ensureTradeFromSignal(
@@ -467,9 +399,7 @@ async function flushTradeCandidateQueue() {
           plan
         );
 
-      if (!savedTrade) {
-        continue;
-      }
+      if (!savedTrade) continue;
 
       const result =
         await sendTelegramBlock(
@@ -516,9 +446,7 @@ async function flushTradeCandidateQueue() {
       );
     }
 
-    if (
-      config.TELEGRAM_SEND_DELAY_MS > 0
-    ) {
+    if (config.TELEGRAM_SEND_DELAY_MS > 0) {
       await delay(
         config.TELEGRAM_SEND_DELAY_MS
       );
@@ -530,9 +458,7 @@ async function evaluateSymbol(
   symbol,
   { sendAlerts = true } = {}
 ) {
-  if (
-    evaluatingSymbols.has(symbol)
-  ) {
+  if (evaluatingSymbols.has(symbol)) {
     return null;
   }
 
@@ -550,9 +476,7 @@ async function evaluateSymbol(
     }
 
     const latestDailyCandle =
-      dailyCandles[
-        dailyCandles.length - 1
-      ];
+      dailyCandles[dailyCandles.length - 1];
 
     const dailyCandleTime =
       Number(
@@ -561,45 +485,36 @@ async function evaluateSymbol(
       ) || null;
 
     const marketData =
-      await getMarketDataCached(
-        symbol
-      );
+      await getMarketDataCached(symbol);
 
     const detectedRoot =
       detectDailyRootSignal(
         dailyCandles,
         {
           symbol,
-          lastPrice:
-            marketData.lastPrice
+          lastPrice: marketData.lastPrice
         }
       );
 
     let activeRoot =
       activeRoots.get(symbol);
 
+    // Expire the active root at the beginning of a new 1D candle.
     if (
       activeRoot &&
       activeRoot.dailyCandleTime !==
         dailyCandleTime
     ) {
       activeRoots.delete(symbol);
+      marketDataCache.delete(symbol);
       activeRoot = null;
     }
 
-    if (!detectedRoot) {
-      if (activeRoot) {
-        activeRoots.delete(symbol);
-      }
-
-      return null;
-    }
-
     let rootDiscovered = false;
-    let candidateRoot =
-      activeRoot;
+    let candidateRoot = activeRoot;
 
-    if (!candidateRoot) {
+    // Latch the discovered root for the whole 1D candle.
+    if (!candidateRoot && detectedRoot) {
       candidateRoot = {
         dailyCandleTime,
         root: {
@@ -607,7 +522,16 @@ async function evaluateSymbol(
           symbol
         }
       };
+      activeRoots.set(
+        symbol,
+        candidateRoot
+      );
       rootDiscovered = true;
+    }
+
+    // No active root means no MTF alert cycle.
+    if (!candidateRoot) {
+      return null;
     }
 
     const mtfCandles = {};
@@ -626,15 +550,21 @@ async function evaluateSymbol(
     let signal = null;
 
     try {
-      signal =
-        await evaluateSignal(
-          symbol,
-          {
-            ...mtfCandles,
-            D: dailyCandles
-          },
-          marketData
-        );
+      signal = await evaluateSignal(
+        symbol,
+        {
+          ...mtfCandles,
+          D: dailyCandles
+        },
+        marketData,
+        {
+          monitorActiveRoot: true,
+          activeRootDailyCandleTime:
+            candidateRoot.dailyCandleTime,
+          activeRootReason:
+            candidateRoot.root.reason
+        }
+      );
     } catch (error) {
       console.error(
         `Signal evaluation failed for ${symbol}:`,
@@ -643,16 +573,7 @@ async function evaluateSymbol(
       return null;
     }
 
-    if (!signal) {
-      return null;
-    }
-
-    if (rootDiscovered) {
-      activeRoots.set(
-        symbol,
-        candidateRoot
-      );
-    }
+    if (!signal) return null;
 
     await recordSignal(signal);
 
@@ -663,9 +584,7 @@ async function evaluateSymbol(
         rootDiscovered
       );
 
-      if (
-        hasLiveAccountConfig()
-      ) {
+      if (hasLiveAccountConfig()) {
         queueTradeCandidate(
           signal,
           marketData
@@ -674,15 +593,12 @@ async function evaluateSymbol(
     }
 
     return {
-      root:
-        candidateRoot.root,
+      root: candidateRoot.root,
       signal,
       marketData
     };
   } finally {
-    evaluatingSymbols.delete(
-      symbol
-    );
+    evaluatingSymbols.delete(symbol);
   }
 }
 
@@ -691,9 +607,7 @@ function normalizeWsCandle(msg) {
     msg?.data?.[0] ||
     msg?.data;
 
-  if (!candle) {
-    return null;
-  }
+  if (!candle) return null;
 
   return {
     open_time: Number(
@@ -743,18 +657,13 @@ function parseKlineTopic(topic) {
 
   return {
     timeframe: parts[1],
-    symbol:
-      parts
-        .slice(2)
-        .join('.')
+    symbol: parts.slice(2).join('.')
   };
 }
 
 async function handleKline(msg) {
   const details =
-    parseKlineTopic(
-      msg?.topic
-    );
+    parseKlineTopic(msg?.topic);
 
   if (
     !details ||
@@ -777,9 +686,7 @@ async function handleKline(msg) {
 
   if (seedingHistory) {
     const previous =
-      bufferedKlines.get(
-        bufferKey
-      );
+      bufferedKlines.get(bufferKey);
 
     if (
       !previous ||
@@ -789,8 +696,7 @@ async function handleKline(msg) {
       bufferedKlines.set(
         bufferKey,
         {
-          symbol:
-            details.symbol,
+          symbol: details.symbol,
           timeframe:
             details.timeframe,
           candle
@@ -812,9 +718,7 @@ async function handleKline(msg) {
       details.symbol
     );
 
-    if (
-      details.timeframe === 'D'
-    ) {
+    if (details.timeframe === 'D') {
       await syncOpenTradesFromMarket();
     }
   } catch (error) {
@@ -825,9 +729,7 @@ async function handleKline(msg) {
   }
 }
 
-function scheduleSymbolEvaluation(
-  symbol
-) {
+function scheduleSymbolEvaluation(symbol) {
   if (!symbol) return;
 
   const oldTimer =
@@ -837,14 +739,10 @@ function scheduleSymbolEvaluation(
     clearTimeout(oldTimer);
   }
 
-  const timer =
-    setTimeout(() => {
-      pendingEvaluations.delete(
-        symbol
-      );
-
-      void processSymbol(symbol);
-    }, EVALUATION_DEBOUNCE_MS);
+  const timer = setTimeout(() => {
+    pendingEvaluations.delete(symbol);
+    void processSymbol(symbol);
+  }, EVALUATION_DEBOUNCE_MS);
 
   pendingEvaluations.set(
     symbol,
@@ -852,9 +750,7 @@ function scheduleSymbolEvaluation(
   );
 }
 
-async function processSymbol(
-  symbol
-) {
+async function processSymbol(symbol) {
   if (
     !startupReady ||
     batchScanRunning
@@ -873,18 +769,11 @@ async function processSymbol(
   }
 }
 
-function handleMarketUpdate(
-  symbol
-) {
+function handleMarketUpdate(symbol) {
   if (!symbol) return;
 
-  marketDataCache.delete(
-    symbol
-  );
-
-  scheduleSymbolEvaluation(
-    symbol
-  );
+  marketDataCache.delete(symbol);
+  scheduleSymbolEvaluation(symbol);
 }
 
 async function discoverSymbols() {
@@ -898,24 +787,15 @@ async function discoverSymbols() {
 
   const instrumentBySymbol =
     new Map(
-      instruments.map(
-        item => [
-          String(
-            item.symbol
-          ).toUpperCase(),
-          item
-        ]
-      )
+      instruments.map((item) => [
+        String(item.symbol).toUpperCase(),
+        item
+      ])
     );
 
-  for (
-    const symbol
-    of selected
-  ) {
+  for (const symbol of selected) {
     const instrument =
-      instrumentBySymbol.get(
-        symbol
-      );
+      instrumentBySymbol.get(symbol);
 
     await upsertSymbol(
       symbol,
@@ -945,10 +825,7 @@ async function seedHistoricalCandles(
   symbolList
 ) {
   const requestedLimit =
-    Number(
-      config.SEED_KLINES_LIMIT ||
-      120
-    );
+    Number(config.SEED_KLINES_LIMIT || 120);
 
   const limit =
     Math.max(
@@ -972,8 +849,7 @@ async function seedHistoricalCandles(
 
   async function worker() {
     while (true) {
-      const index =
-        cursor++;
+      const index = cursor++;
 
       if (
         index >=
@@ -998,9 +874,7 @@ async function seedHistoricalCandles(
             );
 
           if (
-            Array.isArray(
-              candles
-            ) &&
+            Array.isArray(candles) &&
             candles.length > 0
           ) {
             await saveKlines(
@@ -1027,10 +901,7 @@ async function seedHistoricalCandles(
 
   await Promise.all(
     Array.from(
-      {
-        length:
-          workerCount
-      },
+      { length: workerCount },
       () => worker()
     )
   );
@@ -1048,20 +919,14 @@ async function sendRootSummary(
   scanType
 ) {
   const summaryRoots =
-    (roots || []).map(
-      root => ({
-        ...root,
-        summaryKey:
-          rootSummaryKey(root)
-      })
-    );
+    (roots || []).map((root) => ({
+      ...root,
+      summaryKey:
+        rootSummaryKey(root)
+    }));
 
-  if (
-    scanType === 'startup'
-  ) {
-    if (
-      summaryRoots.length === 0
-    ) {
+  if (scanType === 'startup') {
+    if (summaryRoots.length === 0) {
       return [];
     }
 
@@ -1073,13 +938,11 @@ async function sendRootSummary(
     const batchKey =
       `${scanType}:${Date.now()}`;
 
-    let allChunksSent =
-      true;
+    let allChunksSent = true;
 
     for (
       let index = 0;
-      index <
-      chunks.length;
+      index < chunks.length;
       index++
     ) {
       const result =
@@ -1089,8 +952,7 @@ async function sendRootSummary(
         );
 
       if (!result) {
-        allChunksSent =
-          false;
+        allChunksSent = false;
       }
 
       if (
@@ -1103,11 +965,7 @@ async function sendRootSummary(
       }
     }
 
-    if (
-      !allChunksSent
-    ) {
-      return [];
-    }
+    if (!allChunksSent) return [];
 
     for (
       const root
@@ -1124,20 +982,16 @@ async function sendRootSummary(
     return summaryRoots;
   }
 
-  const unseenRoots =
-    [];
+  const unseenRoots = [];
 
   for (
     const root
     of summaryRoots
   ) {
-    const key =
-      root.summaryKey;
+    const key = root.summaryKey;
 
     if (
-      await notificationWasSent(
-        key
-      )
+      await notificationWasSent(key)
     ) {
       continue;
     }
@@ -1145,9 +999,7 @@ async function sendRootSummary(
     unseenRoots.push(root);
   }
 
-  if (
-    unseenRoots.length === 0
-  ) {
+  if (unseenRoots.length === 0) {
     const hourlyBucket =
       new Date()
         .toISOString()
@@ -1168,18 +1020,17 @@ async function sendRootSummary(
 
   const batchKey =
     `${scanType}:${unseenRoots
-      .map(root =>
-        root.summaryKey
+      .map(
+        (root) =>
+          root.summaryKey
       )
       .join('|')}`;
 
-  let allChunksSent =
-    true;
+  let allChunksSent = true;
 
   for (
     let index = 0;
-    index <
-    chunks.length;
+    index < chunks.length;
     index++
   ) {
     const result =
@@ -1189,8 +1040,7 @@ async function sendRootSummary(
       );
 
     if (!result) {
-      allChunksSent =
-        false;
+      allChunksSent = false;
     }
 
     if (
@@ -1203,11 +1053,7 @@ async function sendRootSummary(
     }
   }
 
-  if (
-    !allChunksSent
-  ) {
-    return [];
-  }
+  if (!allChunksSent) return [];
 
   for (
     const root
@@ -1235,19 +1081,14 @@ async function collectCurrentRoots(
   ) {
     try {
       const result =
-        await getDailyRoot(
-          symbol
-        );
+        await getDailyRoot(symbol);
 
-      if (!result) {
-        continue;
-      }
+      if (!result) continue;
 
       roots.push({
         symbol,
         dailyCandleTime:
-          result.root
-            .dailyCandleTime,
+          result.root.dailyCandleTime,
         reason:
           result.root.reason
       });
@@ -1262,13 +1103,8 @@ async function collectCurrentRoots(
   return roots;
 }
 
-async function dispatchRoots(
-  roots
-) {
-  for (
-    const root
-    of roots
-  ) {
+async function dispatchRoots(roots) {
+  for (const root of roots) {
     try {
       await evaluateSymbol(
         root.symbol
@@ -1294,8 +1130,7 @@ async function dispatchRoots(
 async function runInitialScan(
   symbolList
 ) {
-  batchScanRunning =
-    true;
+  batchScanRunning = true;
 
   try {
     const roots =
@@ -1312,23 +1147,15 @@ async function runInitialScan(
       roots
     );
   } finally {
-    batchScanRunning =
-      false;
+    batchScanRunning = false;
   }
 }
 
 async function runBoundaryScan() {
-  if (
-    boundaryScanRunning
-  ) {
-    return;
-  }
+  if (boundaryScanRunning) return;
 
-  boundaryScanRunning =
-    true;
-
-  batchScanRunning =
-    true;
+  boundaryScanRunning = true;
+  batchScanRunning = true;
 
   try {
     marketDataCache.clear();
@@ -1352,12 +1179,8 @@ async function runBoundaryScan() {
       error
     );
   } finally {
-    batchScanRunning =
-      false;
-
-    boundaryScanRunning =
-      false;
-
+    batchScanRunning = false;
+    boundaryScanRunning = false;
     await drainDeferredSymbols();
   }
 }
@@ -1394,37 +1217,26 @@ function resolveBoundaryScanTimeframe() {
     );
 
   const exact =
-    Object.entries(
-      BYBIT_TF_MS
-    ).find(
+    Object.entries(BYBIT_TF_MS).find(
       ([, ms]) =>
-        ms ===
-        configuredMs
+        ms === configuredMs
     );
 
-  if (exact) {
-    return exact[0];
-  }
+  if (exact) return exact[0];
 
   const sorted =
-    Object.entries(
-      BYBIT_TF_MS
-    ).sort(
+    Object.entries(BYBIT_TF_MS).sort(
       (a, b) =>
         a[1] -
         b[1]
     );
 
   for (
-    const [
-      tf,
-      ms
-    ]
+    const [tf, ms]
     of sorted
   ) {
     if (
-      configuredMs <=
-      ms
+      configuredMs <= ms
     ) {
       return tf;
     }
@@ -1437,21 +1249,14 @@ function nextWallClockBoundaryDelayMs(
   timeframe = '15'
 ) {
   const intervalMs =
-    BYBIT_TF_MS[
-      String(timeframe)
-    ] ||
+    BYBIT_TF_MS[String(timeframe)] ||
     BYBIT_TF_MS['15'];
 
-  const now =
-    Date.now();
-
+  const now = Date.now();
   const remainder =
-    now %
-    intervalMs;
+    now % intervalMs;
 
-  if (
-    remainder === 0
-  ) {
+  if (remainder === 0) {
     return (
       intervalMs +
       BOUNDARY_SETTLE_BUFFER_MS
@@ -1477,26 +1282,21 @@ function scheduleNextBoundary() {
   const timeframe =
     resolveBoundaryScanTimeframe();
 
-  const timer =
-    setTimeout(
-      async () => {
-        await runBoundaryScan();
-        scheduleNextBoundary();
-      },
-      nextWallClockBoundaryDelayMs(
-        timeframe
-      )
-    );
+  const timer = setTimeout(
+    async () => {
+      await runBoundaryScan();
+      scheduleNextBoundary();
+    },
+    nextWallClockBoundaryDelayMs(
+      timeframe
+    )
+  );
 
   timer.unref?.();
 }
 
 async function performDailyCleanup() {
-  if (
-    cleanupRunning
-  ) {
-    return;
-  }
+  if (cleanupRunning) return;
 
   const interval =
     Number(
@@ -1515,8 +1315,7 @@ async function performDailyCleanup() {
     return;
   }
 
-  cleanupRunning =
-    true;
+  cleanupRunning = true;
 
   try {
     await purgeStaleCache();
@@ -1538,8 +1337,7 @@ async function performDailyCleanup() {
       error
     );
   } finally {
-    cleanupRunning =
-      false;
+    cleanupRunning = false;
   }
 }
 
@@ -1547,10 +1345,7 @@ async function syncOpenTradesFromMarket() {
   const trades =
     await listOpenTrades();
 
-  for (
-    const trade
-    of trades
-  ) {
+  for (const trade of trades) {
     try {
       const marketData =
         await getMarketDataCached(
@@ -1569,9 +1364,7 @@ async function syncOpenTradesFromMarket() {
           0
         );
 
-      if (
-        currentPrice > 0
-      ) {
+      if (currentPrice > 0) {
         await updateTradeFromMarket(
           trade.symbol,
           currentPrice,
@@ -1589,16 +1382,11 @@ async function syncOpenTradesFromMarket() {
 
 async function replayBufferedKlines() {
   const buffered =
-    [
-      ...bufferedKlines.values()
-    ];
+    [...bufferedKlines.values()];
 
   bufferedKlines.clear();
 
-  for (
-    const item
-    of buffered
-  ) {
+  for (const item of buffered) {
     await saveKline(
       item.symbol,
       item.timeframe,
@@ -1613,34 +1401,21 @@ async function waitForWebSocketSnapshots(
   const wait =
     Math.max(
       0,
-      Number(
-        timeoutMs ||
-        0
-      )
+      Number(timeoutMs || 0)
     );
 
-  if (
-    wait > 0
-  ) {
+  if (wait > 0) {
     await delay(wait);
   }
 }
 
 async function bootstrapStrategy() {
-  if (
-    bootstrapped
-  ) {
-    return;
-  }
-
-  bootstrapped =
-    true;
+  if (bootstrapped) return;
+  bootstrapped = true;
 
   setupKeepAlive();
 
-  if (
-    !config.USE_WS
-  ) {
+  if (!config.USE_WS) {
     throw new Error(
       'This strategyEngine requires USE_WS=true for live operation.'
     );
@@ -1666,16 +1441,14 @@ async function bootstrapStrategy() {
     TIMEFRAMES
   );
 
-  seedingHistory =
-    true;
+  seedingHistory = true;
 
   try {
     await seedHistoricalCandles(
       symbolList
     );
   } finally {
-    seedingHistory =
-      false;
+    seedingHistory = false;
   }
 
   await replayBufferedKlines();
@@ -1690,9 +1463,7 @@ async function bootstrapStrategy() {
     symbolList
   );
 
-  startupReady =
-    true;
-
+  startupReady = true;
   await drainDeferredSymbols();
 
   const cleanupInterval =
@@ -1704,9 +1475,7 @@ async function bootstrapStrategy() {
         1000
     );
 
-  if (
-    cleanupInterval > 0
-  ) {
+  if (cleanupInterval > 0) {
     const cleanupTimer =
       setInterval(
         () => {
