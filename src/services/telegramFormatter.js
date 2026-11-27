@@ -13,11 +13,12 @@ function formatTimeframe(tf) {
 function formatMtfValues(mtfValues = {}) {
   return Object.entries(mtfValues)
     .map(([tf, status]) => {
-      const mark = status === 'bullish'
-        ? '✓'
-        : status === 'neutral'
-          ? '–'
-          : '✗';
+      const mark =
+        status === 'bullish'
+          ? '✓'
+          : status === 'neutral'
+            ? '–'
+            : '✗';
 
       return `${formatTimeframe(tf)}: ${mark}`;
     })
@@ -28,7 +29,11 @@ function formatSummaryTelegram(signals) {
   const symbols = [
     ...new Set(
       (signals || [])
-        .map((signal) => String(signal?.symbol || '').trim().toUpperCase())
+        .map(signal =>
+          String(signal?.symbol || '')
+            .trim()
+            .toUpperCase()
+        )
         .filter(Boolean)
     )
   ].sort();
@@ -36,7 +41,7 @@ function formatSummaryTelegram(signals) {
   return [
     `Valid 1D signals: ${symbols.length}`,
     'A-Z list:',
-    ...symbols.map((symbol) => `${symbol}: 1`)
+    ...symbols.map(symbol => `${symbol}: 1`)
   ].join('\n');
 }
 
@@ -44,12 +49,18 @@ function formatSummaryTelegramChunks(signals, maxLength = 3500) {
   const symbols = [
     ...new Set(
       (signals || [])
-        .map((signal) => String(signal?.symbol || '').trim().toUpperCase())
+        .map(signal =>
+          String(signal?.symbol || '')
+            .trim()
+            .toUpperCase()
+        )
         .filter(Boolean)
     )
   ].sort();
 
-  const header = `Valid 1D signals: ${symbols.length}\nA-Z list:`;
+  const header =
+    `Valid 1D signals: ${symbols.length}\nA-Z list:`;
+
   const chunks = [];
   let lines = [];
   let currentLength = header.length;
@@ -57,7 +68,10 @@ function formatSummaryTelegramChunks(signals, maxLength = 3500) {
   for (const symbol of symbols) {
     const line = `${symbol}: 1`;
 
-    if (lines.length && currentLength + line.length + 1 > maxLength) {
+    if (
+      lines.length &&
+      currentLength + line.length + 1 > maxLength
+    ) {
       chunks.push(`${header}\n${lines.join('\n')}`);
       lines = [];
       currentLength = header.length;
@@ -75,16 +89,48 @@ function formatSummaryTelegramChunks(signals, maxLength = 3500) {
 }
 
 function formatTvRating(signal) {
-  if (signal?.tvScoreAvailable !== true || !Number.isFinite(Number(signal.tvScore))) {
+  if (
+    signal?.tvScoreAvailable !== true ||
+    !Number.isFinite(Number(signal.tvScore))
+  ) {
     return 'N/A (unavailable)';
   }
 
   const raw = Number(signal.tvScore).toFixed(2);
-  const percent = Number.isFinite(Number(signal.tvScorePercent))
+  const percent = Number.isFinite(
+    Number(signal.tvScorePercent)
+  )
     ? `, ${Number(signal.tvScorePercent).toFixed(1)}%`
     : '';
 
   return `${raw} / 1${percent} (${signal.tvScoreLabel || 'unrated'})`;
+}
+
+function formatIsoTime(raw) {
+  const number = Number(raw);
+
+  if (!Number.isFinite(number) || number <= 0) {
+    return 'N/A';
+  }
+
+  const milliseconds =
+    number < 1e12
+      ? number * 1000
+      : number;
+
+  const date = new Date(milliseconds);
+
+  return Number.isNaN(date.getTime())
+    ? 'N/A'
+    : date.toISOString();
+}
+
+function formatOpenPrice(raw) {
+  const number = Number(raw);
+
+  return Number.isFinite(number) && number > 0
+    ? String(number)
+    : 'N/A';
 }
 
 function formatMtfAlignmentAlert(signal) {
@@ -100,6 +146,12 @@ function formatMtfAlignmentAlert(signal) {
     `1D Trigger: ${signal.reason || 'n/a'}`,
     `Decision: ${signal.decision || 'monitor'}`,
     `Latest bullish TF flip: ${latestFlipTf}`,
+    `Flip candle open time: ${formatIsoTime(
+      signal.mtfLatestFlipCandleTime
+    )}`,
+    `Flip candle open price: ${formatOpenPrice(
+      signal.mtfLatestFlipOpenPrice
+    )}`,
     `TradingView technical rating: ${formatTvRating(signal)}`,
     `Custom score: ${signal.customScore ?? 'N/A'} (${signal.customScoreLabel || 'unrated'})`,
     `MTF status: ${signal.mtfStatus || 'neutral'} [${tfString}]`,
@@ -109,15 +161,26 @@ function formatMtfAlignmentAlert(signal) {
     `Liquidity: ${signal.liquidity ?? 'N/A'}`,
     `Stop: ${signal.trailingStop || 'higher_lows or close below 14MA'}`,
     `TP: ${signal.takeProfit || '3%'}`,
-    `Action: ${signal.action || (signal.decision === 'accept' ? 'open' : 'monitor')}`
+    `Action: ${
+      signal.action ||
+      (
+        signal.decision === 'accept'
+          ? 'open'
+          : 'monitor'
+      )
+    }`
   ].join('\n');
 }
 
 function formatRecommendationTelegram(item) {
-  const tfString = formatMtfValues(item.mtfValues || {});
-  const tvRating = item.tvScoreAvailable === true && Number.isFinite(Number(item.tvScore))
-    ? `${Number(item.tvScore).toFixed(2)} / 1 (${item.tvScoreLabel || 'unrated'})`
-    : 'N/A (unavailable)';
+  const tfString =
+    formatMtfValues(item.mtfValues || {});
+
+  const tvRating =
+    item.tvScoreAvailable === true &&
+    Number.isFinite(Number(item.tvScore))
+      ? `${Number(item.tvScore).toFixed(2)} / 1 (${item.tvScoreLabel || 'unrated'})`
+      : 'N/A (unavailable)';
 
   return [
     `Recommended Trade: ${item.symbol}`,
