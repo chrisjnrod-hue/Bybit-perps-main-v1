@@ -23,19 +23,26 @@ function normalizeEpochMs(raw) {
   return num < 1e12 ? num * 1000 : num;
 }
 
-function getLastCandleTime(candles) {
+function getLastCandle(candles) {
   if (!Array.isArray(candles) || candles.length === 0) return null;
-  const last = candles[candles.length - 1];
+  return candles[candles.length - 1];
+}
+
+function getLastCandleTime(candles) {
+  const last = getLastCandle(candles);
+  if (!last) return null;
+
   return normalizeEpochMs(
-    last?.open_time ?? last?.start ?? last?.t ?? last?.timestamp
+    last.open_time ?? last.start ?? last.t ?? last.timestamp
   );
 }
 
 function getLastCandleOpen(candles) {
-  if (!Array.isArray(candles) || candles.length === 0) return null;
-  const last = candles[candles.length - 1];
-  const openPrice = Number(last?.open ?? last?.o);
-  return Number.isFinite(openPrice) && openPrice > 0 ? openPrice : null;
+  const last = getLastCandle(candles);
+  if (!last) return null;
+
+  const open = Number(last.open ?? 0);
+  return Number.isFinite(open) && open > 0 ? open : null;
 }
 
 function directionFromHistogram(histogram) {
@@ -51,58 +58,51 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
   const histogramValues = {};
   const previousHistogramValues = {};
   const candleTimes = {};
+  const activeOpenPrices = {};
   const flippedBullish = [];
   const flipCandleTimes = {};
-  const flipCandleOpens = {};
+  const flipOpenPrices = {};
 
   for (const timeframe of REQUIRED_MTF_TFS) {
     const candles = Array.isArray(candlesByTf[timeframe])
       ? candlesByTf[timeframe]
       : [];
 
-    // Evaluate active open candle strictly at its open price;
-    // prior closed candle evaluated at its closed price.
+    // Evaluate the active candle at open and the previous closed candle at close.
     const currentHistogram = getHistogram(candles, {
       useOpenForLastCandle: true
     });
     const previousHistogram =
       candles.length >= 27
-        ? getHistogram(candles.slice(0, -1), { useOpenForLastCandle: false })
+        ? getHistogram(candles.slice(0, -1), {
+            useOpenForLastCandle: false
+          })
         : null;
 
     const currentDirection = directionFromHistogram(currentHistogram);
     const previousDirection = directionFromHistogram(previousHistogram);
     const lastCandleTime = getLastCandleTime(candles);
-    const lastCandleOpen = getLastCandleOpen(candles);
+    const activeOpenPrice = getLastCandleOpen(candles);
 
     values[timeframe] = currentDirection;
     previousValues[timeframe] = previousDirection;
     histogramValues[timeframe] = currentHistogram;
     previousHistogramValues[timeframe] = previousHistogram;
     candleTimes[timeframe] = lastCandleTime;
+    activeOpenPrices[timeframe] = activeOpenPrice;
 
-    // Strict flip: prior closed candle was negative (< 0) and current
-    // candle evaluated at its open price is positive (> 0).
-    const strictCandleFlip =
+    // A real flip requires a strictly negative previous closed candle
+    // followed by a strictly positive active candle evaluated at its open.
+    const candleLevelFlip =
       previousHistogram !== null &&
       previousHistogram < 0 &&
       currentHistogram !== null &&
       currentHistogram > 0;
 
-    // Only emit a flip once per timeframe candle open timestamp so
-    // subsequent ticks on the same candle do not re-trigger or shift.
-    const prevFlipTimeForTf = previousSnapshot?.flipCandleTimes?.[timeframe] || null;
-    const isNewFlipCandle =
-      strictCandleFlip &&
-      lastCandleTime !== null &&
-      lastCandleTime !== prevFlipTimeForTf;
-
-    if (isNewFlipCandle) {
+    if (candleLevelFlip) {
       flippedBullish.push(timeframe);
       flipCandleTimes[timeframe] = lastCandleTime;
-      if (lastCandleOpen !== null) {
-        flipCandleOpens[timeframe] = lastCandleOpen;
-      }
+      flipOpenPrices[timeframe] = activeOpenPrice;
     }
   }
 
@@ -119,19 +119,21 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
   ).length;
 
   const aligned = bullishCount === REQUIRED_MTF_TFS.length;
+  const wasPreviouslyAligned = previousSnapshot?.aligned === true;
 
   let status = 'mixed';
   if (aligned) status = 'bullish';
   else if (negativeCount === REQUIRED_MTF_TFS.length) status = 'negative';
   else if (neutralCount === REQUIRED_MTF_TFS.length) status = 'neutral';
 
-  // Pick the timeframe that flipped most recently (highest candleTime, then highest TF)
+  // Pick the timeframe whose active candle crossed most recently.
+  // Use its candle open time and, then, timeframe order as tie-breakers.
   const latestFlippedBullish =
     flippedBullish
       .map((timeframe) => ({
         timeframe,
         candleTime: flipCandleTimes[timeframe],
-        openPrice: flipCandleOpens[timeframe] ?? null
+        openPrice: flipOpenPrices[timeframe]
       }))
       .sort((a, b) => {
         if ((b.candleTime || 0) !== (a.candleTime || 0)) {
@@ -140,9 +142,11 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
         return (TF_ORDER[b.timeframe] || 0) - (TF_ORDER[a.timeframe] || 0);
       })[0] || null;
 
-  // Trigger alignmentFlip when all required TFs are bullish and at least one TF
-  // just completed a strict negative-closed -> positive-open flip on this candle.
-  const alignmentFlip = aligned && latestFlippedBullish !== null;
+  // Alignment completion is separate from the candle-level flip.
+  const alignmentFlip =
+    aligned &&
+    !wasPreviouslyAligned &&
+    latestFlippedBullish !== null;
 
   return {
     status,
@@ -151,14 +155,15 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     histogramValues,
     previousHistogramValues,
     candleTimes,
+    activeOpenPrices,
     aligned,
     alignmentFlip,
     flippedBullish,
     flipCandleTimes,
-    flipCandleOpens,
+    flipOpenPrices,
     latestFlippedBullishTimeframe: latestFlippedBullish?.timeframe || null,
     latestFlipCandleTime: latestFlippedBullish?.candleTime || null,
-    latestFlipOpenPrice: latestFlippedBullish?.openPrice ?? null,
+    latestFlipOpenPrice: latestFlippedBullish?.openPrice || null,
     bullish: bullishCount,
     negative: negativeCount,
     neutral: neutralCount
