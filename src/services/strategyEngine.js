@@ -1,6 +1,7 @@
 const config = require('../config');
 const { fetchAllSymbols, fetchKlines } = require('./bybitRest');
 const bybitWs = require('./bybitWs');
+
 const {
   upsertSymbol,
   getLatestCandles,
@@ -13,31 +14,47 @@ const {
   markNotificationSent,
   purgeStaleCache
 } = require('../db');
-const { filterUsdtPerpetualSymbols } = require('./symbolScanner');
+
+const { filterUsdtPerpetualSymbols } =
+  require('./symbolScanner');
+
 const {
   evaluateSignal,
   detectDailyRootSignal
 } = require('./signalManager');
+
 const {
   shouldOpenTrade,
   rankTradeCandidates,
   buildTradePlan
 } = require('./tradeManager');
+
 const {
   ensureTradeFromSignal,
   updateTradeFromMarket
 } = require('./openTradeTracker');
-const { sendTelegramMessage } = require('./telegram');
+
+const { sendTelegramMessage } =
+  require('./telegram');
+
 const {
   formatSummaryTelegramChunks,
   formatMtfAlignmentAlert,
   formatRecommendationTelegram
 } = require('./telegramFormatter');
-const { buildMarketData } = require('./marketData');
-const { setupKeepAlive } = require('./keepalive');
 
-const TIMEFRAMES = ['5', '15', '60', '240', 'D'];
-const MTF_TIMEFRAMES = ['5', '15', '60', '240'];
+const { buildMarketData } =
+  require('./marketData');
+
+const { setupKeepAlive } =
+  require('./keepalive');
+
+const TIMEFRAMES =
+  ['5', '15', '60', '240', 'D'];
+
+const MTF_TIMEFRAMES =
+  ['5', '15', '60', '240'];
+
 const BYBIT_TF_MS = {
   '5': 5 * 60 * 1000,
   '15': 15 * 60 * 1000,
@@ -71,16 +88,24 @@ const deferredSymbols = new Set();
 const bufferedKlines = new Map();
 const tradeCandidates = new Map();
 const activeRoots = new Map();
+const evaluatingSymbols = new Set();
 
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
+  );
 }
 
 function isBoundaryScanEnabled() {
-  if (typeof config.ENABLE_BOUNDARY_SCAN === 'boolean') {
+  if (
+    typeof config.ENABLE_BOUNDARY_SCAN === 'boolean'
+  ) {
     return config.ENABLE_BOUNDARY_SCAN;
   }
-  return String(config.ENABLE_BOUNDARY_SCAN || '').trim().toLowerCase() === 'true';
+
+  return String(
+    config.ENABLE_BOUNDARY_SCAN || ''
+  ).trim().toLowerCase() === 'true';
 }
 
 function hasLiveAccountConfig() {
@@ -93,17 +118,38 @@ function hasLiveAccountConfig() {
 }
 
 function dailySignalKey(signal) {
-  return `${signal.symbol}:${Number(signal.dailyCandleTime || 0)}`;
+  return `${signal.symbol}:${Number(
+    signal.dailyCandleTime || 0
+  )}`;
 }
 
 function persistentNotificationKey(type, signal) {
   if (type === ALIGNMENT_PREFIX) {
-    const flipTf = signal.mtfLatestFlippedBullish || 'none';
+    const flipTf =
+      signal.mtfLatestFlippedBullish ||
+      'none';
+
     const flipTime = Number(
-      signal.mtfLatestFlipCandleTime || signal.dailyCandleTime || 0
+      signal.mtfLatestFlipCandleTime ||
+      signal.dailyCandleTime ||
+      0
     );
-    return `${type}:${dailySignalKey(signal)}:${flipTf}:${flipTime}`;
+
+    const flipOpenPrice =
+      Number(
+        signal.mtfLatestFlipOpenPrice ||
+        0
+      );
+
+    return [
+      type,
+      dailySignalKey(signal),
+      flipTf,
+      flipTime,
+      flipOpenPrice
+    ].join(':');
   }
+
   return `${type}:${dailySignalKey(signal)}`;
 }
 
@@ -112,18 +158,27 @@ async function sendTelegramBlock(text, dedupeKey) {
 
   return sendTelegramMessage(text, {
     dedupeKey,
-    ttlMs: Number(config.TELEGRAM_DEDUPE_TTL_MS || 60000)
+    ttlMs: Number(
+      config.TELEGRAM_DEDUPE_TTL_MS ||
+      60000
+    )
   });
 }
 
 async function getMarketDataCached(symbol) {
   const cached = marketDataCache.get(symbol);
 
-  if (cached && Date.now() - cached.cachedAt < MARKET_DATA_CACHE_TTL_MS) {
+  if (
+    cached &&
+    Date.now() - cached.cachedAt <
+      MARKET_DATA_CACHE_TTL_MS
+  ) {
     return cached.data;
   }
 
-  const data = await buildMarketData(symbol);
+  const data =
+    await buildMarketData(symbol);
+
   marketDataCache.set(symbol, {
     cachedAt: Date.now(),
     data
@@ -133,26 +188,42 @@ async function getMarketDataCached(symbol) {
 }
 
 async function getCandles(symbol, timeframe) {
-  return getLatestCandles(symbol, timeframe, 200);
+  return getLatestCandles(
+    symbol,
+    timeframe,
+    200
+  );
 }
 
 async function getDailyRoot(symbol) {
-  const dailyCandles = await getCandles(symbol, 'D');
+  const dailyCandles =
+    await getCandles(symbol, 'D');
 
-  if (!Array.isArray(dailyCandles) || dailyCandles.length < 8) {
+  if (
+    !Array.isArray(dailyCandles) ||
+    dailyCandles.length < 8
+  ) {
     return null;
   }
 
-  const marketData = await getMarketDataCached(symbol);
-  const root = detectDailyRootSignal(dailyCandles, {
-    symbol,
-    lastPrice: marketData.lastPrice
-  });
+  const marketData =
+    await getMarketDataCached(symbol);
+
+  const root = detectDailyRootSignal(
+    dailyCandles,
+    {
+      symbol,
+      lastPrice: marketData.lastPrice
+    }
+  );
 
   if (!root) return null;
 
   return {
-    root: { ...root, symbol },
+    root: {
+      ...root,
+      symbol
+    },
     dailyCandles,
     marketData
   };
@@ -165,55 +236,124 @@ function alertData(signal, marketData) {
     decision: signal.decision,
     reason: signal.reason,
     customScore: signal.customScore,
-    customScoreLabel: signal.customScoreLabel,
+    customScoreLabel:
+      signal.customScoreLabel,
     tvScore: signal.tvScore,
-    tvScorePercent: signal.tvScorePercent,
-    tvScoreLabel: signal.tvScoreLabel,
-    tvScoreAvailable: signal.tvScoreAvailable,
+    tvScorePercent:
+      signal.tvScorePercent,
+    tvScoreLabel:
+      signal.tvScoreLabel,
+    tvScoreAvailable:
+      signal.tvScoreAvailable,
     mtfStatus: signal.mtfStatus,
     mtfValues: signal.mtfValues,
-    mtfLatestFlippedBullish: signal.mtfLatestFlippedBullish,
-    price: Number(signal.price || marketData.lastPrice || 0),
-    volume24h: Number(marketData.volume24hUsd || 0),
-    spreadPct: Number(marketData.spreadPct || 0),
-    liquidity: signal.liquidity?.valid ? 'valid' : 'invalid',
-    trailingStop: 'higher_lows or close below 14MA',
-    takeProfit: `${Number(config.DEFAULT_TP_PERCENT || 3)}%`,
-    action: signal.decision === 'accept' ? 'open' : 'monitor'
+    mtfLatestFlippedBullish:
+      signal.mtfLatestFlippedBullish,
+    mtfLatestFlipCandleTime:
+      signal.mtfLatestFlipCandleTime,
+    mtfLatestFlipOpenPrice:
+      signal.mtfLatestFlipOpenPrice,
+    price: Number(
+      signal.price ||
+      marketData.lastPrice ||
+      0
+    ),
+    volume24h: Number(
+      marketData.volume24hUsd ||
+      0
+    ),
+    spreadPct: Number(
+      marketData.spreadPct ||
+      0
+    ),
+    liquidity:
+      signal.liquidity?.valid
+        ? 'valid'
+        : 'invalid',
+    trailingStop:
+      'higher_lows or close below 14MA',
+    takeProfit:
+      `${Number(
+        config.DEFAULT_TP_PERCENT ||
+        3
+      )}%`,
+    action:
+      signal.decision === 'accept'
+        ? 'open'
+        : 'monitor'
   };
 }
 
-function shouldEmitMtfAlignmentAlert(signal, rootDiscovered = false) {
-  if (!signal || !signal.symbol) return false;
+function shouldEmitMtfAlignmentAlert(
+  signal,
+  rootDiscovered = false
+) {
+  if (!signal || !signal.symbol) {
+    return false;
+  }
 
   const subTfCompletion =
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish' &&
     signal.mtfAlignmentFlip === true &&
-    Boolean(signal.mtfLatestFlippedBullish);
+    Boolean(
+      signal.mtfLatestFlippedBullish
+    );
 
   const dailyRootCompletion =
     rootDiscovered === true &&
-    (signal.macdFlip === true || signal.openAboveMa7 === true) &&
+    (
+      signal.macdFlip === true ||
+      signal.openAboveMa7 === true
+    ) &&
     signal.mtfAligned === true &&
     signal.mtfStatus === 'bullish' &&
-    Boolean(signal.mtfLatestFlippedBullish);
+    Boolean(
+      signal.mtfLatestFlippedBullish
+    );
 
-  return subTfCompletion || dailyRootCompletion;
+  return (
+    subTfCompletion ||
+    dailyRootCompletion
+  );
 }
 
-async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = false) {
-  if (!shouldEmitMtfAlignmentAlert(signal, rootDiscovered)) {
+async function maybeSendAlignmentAlert(
+  signal,
+  marketData,
+  rootDiscovered = false
+) {
+  if (
+    !shouldEmitMtfAlignmentAlert(
+      signal,
+      rootDiscovered
+    )
+  ) {
     return false;
   }
 
-  const key = persistentNotificationKey(ALIGNMENT_PREFIX, signal);
-  if (await notificationWasSent(key)) return false;
+  const key =
+    persistentNotificationKey(
+      ALIGNMENT_PREFIX,
+      signal
+    );
 
-  const result = await sendTelegramBlock(
-    formatMtfAlignmentAlert(alertData(signal, marketData)),
-    key
-  );
+  if (
+    await notificationWasSent(key)
+  ) {
+    return false;
+  }
+
+  const result =
+    await sendTelegramBlock(
+      formatMtfAlignmentAlert(
+        alertData(
+          signal,
+          marketData
+        )
+      ),
+      key
+    );
 
   if (!result) return false;
 
@@ -227,18 +367,38 @@ async function maybeSendAlignmentAlert(signal, marketData, rootDiscovered = fals
   return true;
 }
 
-function queueTradeCandidate(signal, marketData) {
+function queueTradeCandidate(
+  signal,
+  marketData
+) {
   const market = {
-    volume24hUsd: Number(marketData?.volume24hUsd || 0),
-    spreadPct: Number(marketData?.spreadPct ?? 0.02),
-    topOfBookDepthUsd: Number(marketData?.topOfBookDepthUsd || 0)
+    volume24hUsd: Number(
+      marketData?.volume24hUsd ||
+      0
+    ),
+    spreadPct: Number(
+      marketData?.spreadPct ??
+      0.02
+    ),
+    topOfBookDepthUsd: Number(
+      marketData?.topOfBookDepthUsd ||
+      0
+    )
   };
 
-  const eligibility = shouldOpenTrade(signal, market);
+  const eligibility =
+    shouldOpenTrade(signal, market);
+
   if (!eligibility.open) return;
 
-  const key = dailySignalKey(signal);
-  tradeCandidates.set(key, { signal, marketData, market });
+  const key =
+    dailySignalKey(signal);
+
+  tradeCandidates.set(key, {
+    signal,
+    marketData,
+    market
+  });
 
   if (tradeQueueTimer) return;
 
@@ -249,45 +409,97 @@ function queueTradeCandidate(signal, marketData) {
 }
 
 async function flushTradeCandidateQueue() {
-  const candidates = rankTradeCandidates([...tradeCandidates.values()]);
+  const candidates =
+    rankTradeCandidates(
+      [...tradeCandidates.values()]
+    );
+
   tradeCandidates.clear();
 
   for (const candidate of candidates) {
-    const { signal, market } = candidate;
-    const key = persistentNotificationKey(RECOMMENDATION_PREFIX, signal);
+    const {
+      signal,
+      market
+    } = candidate;
+
+    const key =
+      persistentNotificationKey(
+        RECOMMENDATION_PREFIX,
+        signal
+      );
 
     try {
-      if (await notificationWasSent(key)) continue;
+      if (
+        await notificationWasSent(key)
+      ) {
+        continue;
+      }
 
-      if ((await countOpenTrades()) >= Number(config.MAX_OPEN_TRADES || 3)) {
+      if (
+        (await countOpenTrades()) >=
+        Number(
+          config.MAX_OPEN_TRADES ||
+          3
+        )
+      ) {
         break;
       }
 
-      const eligibility = shouldOpenTrade(signal, market);
-      if (!eligibility.open) continue;
+      const eligibility =
+        shouldOpenTrade(
+          signal,
+          market
+        );
 
-      const plan = buildTradePlan(signal, market);
-      const savedTrade = await ensureTradeFromSignal(signal, plan);
-      if (!savedTrade) continue;
+      if (!eligibility.open) {
+        continue;
+      }
 
-      const result = await sendTelegramBlock(
-        formatRecommendationTelegram({
-          symbol: signal.symbol,
-          action: 'open',
-          tvScore: signal.tvScore,
-          tvScoreAvailable: signal.tvScoreAvailable,
-          tvScorePercent: signal.tvScorePercent,
-          tvScoreLabel: signal.tvScoreLabel,
-          customScore: signal.customScore,
-          customScoreLabel: signal.customScoreLabel,
-          mtfStatus: signal.mtfStatus,
-          mtfValues: signal.mtfValues,
-          liquidity: signal.liquidity?.valid ? 'valid' : 'invalid',
-          reason: signal.reason,
+      const plan =
+        buildTradePlan(
+          signal,
+          market
+        );
+
+      const savedTrade =
+        await ensureTradeFromSignal(
+          signal,
           plan
-        }),
-        key
-      );
+        );
+
+      if (!savedTrade) {
+        continue;
+      }
+
+      const result =
+        await sendTelegramBlock(
+          formatRecommendationTelegram({
+            symbol: signal.symbol,
+            action: 'open',
+            tvScore: signal.tvScore,
+            tvScoreAvailable:
+              signal.tvScoreAvailable,
+            tvScorePercent:
+              signal.tvScorePercent,
+            tvScoreLabel:
+              signal.tvScoreLabel,
+            customScore:
+              signal.customScore,
+            customScoreLabel:
+              signal.customScoreLabel,
+            mtfStatus:
+              signal.mtfStatus,
+            mtfValues:
+              signal.mtfValues,
+            liquidity:
+              signal.liquidity?.valid
+                ? 'valid'
+                : 'invalid',
+            reason: signal.reason,
+            plan
+          }),
+          key
+        );
 
       if (result) {
         await markNotificationSent(
@@ -304,170 +516,349 @@ async function flushTradeCandidateQueue() {
       );
     }
 
-    if (config.TELEGRAM_SEND_DELAY_MS > 0) {
-      await delay(config.TELEGRAM_SEND_DELAY_MS);
+    if (
+      config.TELEGRAM_SEND_DELAY_MS > 0
+    ) {
+      await delay(
+        config.TELEGRAM_SEND_DELAY_MS
+      );
     }
   }
 }
 
-async function evaluateSymbol(symbol, { sendAlerts = true } = {}) {
-  const dailyCandles = await getCandles(symbol, 'D');
-
-  if (!Array.isArray(dailyCandles) || dailyCandles.length < 8) {
+async function evaluateSymbol(
+  symbol,
+  { sendAlerts = true } = {}
+) {
+  if (
+    evaluatingSymbols.has(symbol)
+  ) {
     return null;
   }
 
-  const latestDailyCandle = dailyCandles[dailyCandles.length - 1];
-  const dailyCandleTime = Number(latestDailyCandle?.open_time || 0) || null;
-
-  const marketData = await getMarketDataCached(symbol);
-  const detectedRoot = detectDailyRootSignal(dailyCandles, {
-    symbol,
-    lastPrice: marketData.lastPrice
-  });
-
-  let activeRoot = activeRoots.get(symbol);
-
-  if (activeRoot && activeRoot.dailyCandleTime !== dailyCandleTime) {
-    activeRoots.delete(symbol);
-    activeRoot = null;
-  }
-
-  if (!detectedRoot) {
-    if (activeRoot) {
-      activeRoots.delete(symbol);
-    }
-    return null;
-  }
-
-  let rootDiscovered = false;
-  let candidateRoot = activeRoot;
-
-  if (!candidateRoot) {
-    candidateRoot = {
-      dailyCandleTime,
-      root: { ...detectedRoot, symbol }
-    };
-    rootDiscovered = true;
-  }
-
-  const mtfCandles = {};
-  for (const timeframe of MTF_TIMEFRAMES) {
-    mtfCandles[timeframe] = await getCandles(symbol, timeframe);
-  }
-
-  let signal = null;
+  evaluatingSymbols.add(symbol);
 
   try {
-    signal = await evaluateSignal(
-      symbol,
-      { ...mtfCandles, D: dailyCandles },
-      marketData
-    );
-  } catch (error) {
-    console.error(`Signal evaluation failed for ${symbol}:`, error.message);
-    return null;
-  }
+    const dailyCandles =
+      await getCandles(symbol, 'D');
 
-  if (!signal) return null;
-
-  if (rootDiscovered) {
-    activeRoots.set(symbol, candidateRoot);
-  }
-
-  await recordSignal(signal);
-
-  if (sendAlerts) {
-    await maybeSendAlignmentAlert(signal, marketData, rootDiscovered);
-
-    if (hasLiveAccountConfig()) {
-      queueTradeCandidate(signal, marketData);
+    if (
+      !Array.isArray(dailyCandles) ||
+      dailyCandles.length < 8
+    ) {
+      return null;
     }
-  }
 
-  return {
-    root: candidateRoot.root,
-    signal,
-    marketData
-  };
+    const latestDailyCandle =
+      dailyCandles[
+        dailyCandles.length - 1
+      ];
+
+    const dailyCandleTime =
+      Number(
+        latestDailyCandle?.open_time ||
+        0
+      ) || null;
+
+    const marketData =
+      await getMarketDataCached(
+        symbol
+      );
+
+    const detectedRoot =
+      detectDailyRootSignal(
+        dailyCandles,
+        {
+          symbol,
+          lastPrice:
+            marketData.lastPrice
+        }
+      );
+
+    let activeRoot =
+      activeRoots.get(symbol);
+
+    if (
+      activeRoot &&
+      activeRoot.dailyCandleTime !==
+        dailyCandleTime
+    ) {
+      activeRoots.delete(symbol);
+      activeRoot = null;
+    }
+
+    if (!detectedRoot) {
+      if (activeRoot) {
+        activeRoots.delete(symbol);
+      }
+
+      return null;
+    }
+
+    let rootDiscovered = false;
+    let candidateRoot =
+      activeRoot;
+
+    if (!candidateRoot) {
+      candidateRoot = {
+        dailyCandleTime,
+        root: {
+          ...detectedRoot,
+          symbol
+        }
+      };
+      rootDiscovered = true;
+    }
+
+    const mtfCandles = {};
+
+    for (
+      const timeframe
+      of MTF_TIMEFRAMES
+    ) {
+      mtfCandles[timeframe] =
+        await getCandles(
+          symbol,
+          timeframe
+        );
+    }
+
+    let signal = null;
+
+    try {
+      signal =
+        await evaluateSignal(
+          symbol,
+          {
+            ...mtfCandles,
+            D: dailyCandles
+          },
+          marketData
+        );
+    } catch (error) {
+      console.error(
+        `Signal evaluation failed for ${symbol}:`,
+        error.message
+      );
+      return null;
+    }
+
+    if (!signal) {
+      return null;
+    }
+
+    if (rootDiscovered) {
+      activeRoots.set(
+        symbol,
+        candidateRoot
+      );
+    }
+
+    await recordSignal(signal);
+
+    if (sendAlerts) {
+      await maybeSendAlignmentAlert(
+        signal,
+        marketData,
+        rootDiscovered
+      );
+
+      if (
+        hasLiveAccountConfig()
+      ) {
+        queueTradeCandidate(
+          signal,
+          marketData
+        );
+      }
+    }
+
+    return {
+      root:
+        candidateRoot.root,
+      signal,
+      marketData
+    };
+  } finally {
+    evaluatingSymbols.delete(
+      symbol
+    );
+  }
 }
 
 function normalizeWsCandle(msg) {
-  const candle = msg?.data?.[0] || msg?.data;
-  if (!candle) return null;
+  const candle =
+    msg?.data?.[0] ||
+    msg?.data;
+
+  if (!candle) {
+    return null;
+  }
 
   return {
-    open_time: Number(candle.start || candle.t || candle.open_time || 0),
-    open: Number(candle.open || candle.o || 0),
-    high: Number(candle.high || candle.h || 0),
-    low: Number(candle.low || candle.l || 0),
-    close: Number(candle.close || candle.c || 0),
-    volume: Number(candle.volume || candle.v || 0)
+    open_time: Number(
+      candle.start ||
+      candle.t ||
+      candle.open_time ||
+      0
+    ),
+    open: Number(
+      candle.open ||
+      candle.o ||
+      0
+    ),
+    high: Number(
+      candle.high ||
+      candle.h ||
+      0
+    ),
+    low: Number(
+      candle.low ||
+      candle.l ||
+      0
+    ),
+    close: Number(
+      candle.close ||
+      candle.c ||
+      0
+    ),
+    volume: Number(
+      candle.volume ||
+      candle.v ||
+      0
+    )
   };
 }
 
 function parseKlineTopic(topic) {
-  const parts = String(topic || '').split('.');
-  if (parts.length < 3 || parts[0] !== 'kline') return null;
+  const parts =
+    String(topic || '').split('.');
+
+  if (
+    parts.length < 3 ||
+    parts[0] !== 'kline'
+  ) {
+    return null;
+  }
 
   return {
     timeframe: parts[1],
-    symbol: parts.slice(2).join('.')
+    symbol:
+      parts
+        .slice(2)
+        .join('.')
   };
 }
 
 async function handleKline(msg) {
-  const details = parseKlineTopic(msg?.topic);
-  if (!details || !TIMEFRAMES.includes(details.timeframe)) return;
+  const details =
+    parseKlineTopic(
+      msg?.topic
+    );
 
-  const candle = normalizeWsCandle(msg);
-  if (!candle?.open_time) return;
+  if (
+    !details ||
+    !TIMEFRAMES.includes(
+      details.timeframe
+    )
+  ) {
+    return;
+  }
 
-  const bufferKey = `${details.symbol}:${details.timeframe}`;
+  const candle =
+    normalizeWsCandle(msg);
+
+  if (!candle?.open_time) {
+    return;
+  }
+
+  const bufferKey =
+    `${details.symbol}:${details.timeframe}`;
 
   if (seedingHistory) {
-    const previous = bufferedKlines.get(bufferKey);
-    if (!previous || candle.open_time >= previous.candle.open_time) {
-      bufferedKlines.set(bufferKey, {
-        symbol: details.symbol,
-        timeframe: details.timeframe,
-        candle
-      });
+    const previous =
+      bufferedKlines.get(
+        bufferKey
+      );
+
+    if (
+      !previous ||
+      candle.open_time >=
+        previous.candle.open_time
+    ) {
+      bufferedKlines.set(
+        bufferKey,
+        {
+          symbol:
+            details.symbol,
+          timeframe:
+            details.timeframe,
+          candle
+        }
+      );
     }
+
     return;
   }
 
   try {
-    await saveKline(details.symbol, details.timeframe, candle);
-    if (details.timeframe === 'D') {
-      marketDataCache.delete(details.symbol);
-    }
-    scheduleSymbolEvaluation(details.symbol);
+    await saveKline(
+      details.symbol,
+      details.timeframe,
+      candle
+    );
 
-    if (details.timeframe === 'D') {
+    scheduleSymbolEvaluation(
+      details.symbol
+    );
+
+    if (
+      details.timeframe === 'D'
+    ) {
       await syncOpenTradesFromMarket();
     }
   } catch (error) {
-    console.error(`Failed to store WS candle for ${details.symbol}:`, error);
+    console.error(
+      `Failed to store WS candle for ${details.symbol}:`,
+      error
+    );
   }
 }
 
-function scheduleSymbolEvaluation(symbol) {
+function scheduleSymbolEvaluation(
+  symbol
+) {
   if (!symbol) return;
 
-  const oldTimer = pendingEvaluations.get(symbol);
-  if (oldTimer) clearTimeout(oldTimer);
+  const oldTimer =
+    pendingEvaluations.get(symbol);
 
-  const timer = setTimeout(() => {
-    pendingEvaluations.delete(symbol);
-    void processSymbol(symbol);
-  }, EVALUATION_DEBOUNCE_MS);
+  if (oldTimer) {
+    clearTimeout(oldTimer);
+  }
 
-  pendingEvaluations.set(symbol, timer);
+  const timer =
+    setTimeout(() => {
+      pendingEvaluations.delete(
+        symbol
+      );
+
+      void processSymbol(symbol);
+    }, EVALUATION_DEBOUNCE_MS);
+
+  pendingEvaluations.set(
+    symbol,
+    timer
+  );
 }
 
-async function processSymbol(symbol) {
-  if (!startupReady || batchScanRunning) {
+async function processSymbol(
+  symbol
+) {
+  if (
+    !startupReady ||
+    batchScanRunning
+  ) {
     deferredSymbols.add(symbol);
     return;
   }
@@ -475,33 +866,69 @@ async function processSymbol(symbol) {
   try {
     await evaluateSymbol(symbol);
   } catch (error) {
-    console.error(`Signal evaluation failed for ${symbol}:`, error);
+    console.error(
+      `Signal evaluation failed for ${symbol}:`,
+      error
+    );
   }
 }
 
-function handleMarketUpdate(symbol) {
+function handleMarketUpdate(
+  symbol
+) {
   if (!symbol) return;
 
-  marketDataCache.delete(symbol);
-  scheduleSymbolEvaluation(symbol);
+  marketDataCache.delete(
+    symbol
+  );
+
+  scheduleSymbolEvaluation(
+    symbol
+  );
 }
 
 async function discoverSymbols() {
-  const instruments = await fetchAllSymbols();
-  const selected = filterUsdtPerpetualSymbols(instruments);
+  let instruments =
+    await fetchAllSymbols();
 
-  const instrumentBySymbol = new Map(
-    instruments.map((item) => [String(item.symbol).toUpperCase(), item])
-  );
+  const selected =
+    filterUsdtPerpetualSymbols(
+      instruments
+    );
 
-  for (const symbol of selected) {
-    const instrument = instrumentBySymbol.get(symbol);
+  const instrumentBySymbol =
+    new Map(
+      instruments.map(
+        item => [
+          String(
+            item.symbol
+          ).toUpperCase(),
+          item
+        ]
+      )
+    );
+
+  for (
+    const symbol
+    of selected
+  ) {
+    const instrument =
+      instrumentBySymbol.get(
+        symbol
+      );
+
     await upsertSymbol(
       symbol,
-      instrument?.base || symbol.replace(/USDT(\.P)?$/i, ''),
-      instrument?.quote || 'USDT',
+      instrument?.base ||
+        symbol.replace(
+          /USDT(\.P)?$/i,
+          ''
+        ),
+      instrument?.quote ||
+        'USDT',
       'active'
     );
+
     symbols.add(symbol);
   }
 
@@ -514,24 +941,73 @@ async function discoverSymbols() {
   return [...symbols];
 }
 
-async function seedHistoricalCandles(symbolList) {
-  const requestedLimit = Number(config.SEED_KLINES_LIMIT || 120);
-  const limit = Math.max(27, Math.min(200, requestedLimit));
-  const concurrency = Math.max(1, Number(config.SEED_CONCURRENCY || 1));
+async function seedHistoricalCandles(
+  symbolList
+) {
+  const requestedLimit =
+    Number(
+      config.SEED_KLINES_LIMIT ||
+      120
+    );
+
+  const limit =
+    Math.max(
+      27,
+      Math.min(
+        200,
+        requestedLimit
+      )
+    );
+
+  const concurrency =
+    Math.max(
+      1,
+      Number(
+        config.SEED_CONCURRENCY ||
+        1
+      )
+    );
+
   let cursor = 0;
 
   async function worker() {
     while (true) {
-      const index = cursor++;
-      if (index >= symbolList.length) return;
+      const index =
+        cursor++;
 
-      const symbol = symbolList[index];
+      if (
+        index >=
+        symbolList.length
+      ) {
+        return;
+      }
 
-      for (const timeframe of TIMEFRAMES) {
+      const symbol =
+        symbolList[index];
+
+      for (
+        const timeframe
+        of TIMEFRAMES
+      ) {
         try {
-          const candles = await fetchKlines(symbol, timeframe, limit);
-          if (Array.isArray(candles) && candles.length > 0) {
-            await saveKlines(symbol, timeframe, candles);
+          const candles =
+            await fetchKlines(
+              symbol,
+              timeframe,
+              limit
+            );
+
+          if (
+            Array.isArray(
+              candles
+            ) &&
+            candles.length > 0
+          ) {
+            await saveKlines(
+              symbol,
+              timeframe,
+              candles
+            );
           }
         } catch (error) {
           console.error(
@@ -543,42 +1019,100 @@ async function seedHistoricalCandles(symbolList) {
     }
   }
 
-  const workerCount = Math.min(concurrency, symbolList.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  const workerCount =
+    Math.min(
+      concurrency,
+      symbolList.length
+    );
+
+  await Promise.all(
+    Array.from(
+      {
+        length:
+          workerCount
+      },
+      () => worker()
+    )
+  );
 }
 
 function rootSummaryKey(root) {
-  return persistentNotificationKey(ROOT_SUMMARY_PREFIX, root);
+  return persistentNotificationKey(
+    ROOT_SUMMARY_PREFIX,
+    root
+  );
 }
 
-async function sendRootSummary(roots, scanType) {
-  const summaryRoots = (roots || []).map((root) => ({
-    ...root,
-    summaryKey: rootSummaryKey(root)
-  }));
+async function sendRootSummary(
+  roots,
+  scanType
+) {
+  const summaryRoots =
+    (roots || []).map(
+      root => ({
+        ...root,
+        summaryKey:
+          rootSummaryKey(root)
+      })
+    );
 
-  if (scanType === 'startup') {
-    if (summaryRoots.length === 0) return [];
-    const chunks = formatSummaryTelegramChunks(summaryRoots);
-    const batchKey = `${scanType}:${Date.now()}`;
+  if (
+    scanType === 'startup'
+  ) {
+    if (
+      summaryRoots.length === 0
+    ) {
+      return [];
+    }
 
-    let allChunksSent = true;
-
-    for (let index = 0; index < chunks.length; index++) {
-      const result = await sendTelegramBlock(
-        chunks[index],
-        `${batchKey}:chunk:${index}`
+    const chunks =
+      formatSummaryTelegramChunks(
+        summaryRoots
       );
-      if (!result) allChunksSent = false;
 
-      if (config.TELEGRAM_SEND_DELAY_MS > 0) {
-        await delay(config.TELEGRAM_SEND_DELAY_MS);
+    const batchKey =
+      `${scanType}:${Date.now()}`;
+
+    let allChunksSent =
+      true;
+
+    for (
+      let index = 0;
+      index <
+      chunks.length;
+      index++
+    ) {
+      const result =
+        await sendTelegramBlock(
+          chunks[index],
+          `${batchKey}:chunk:${index}`
+        );
+
+      if (!result) {
+        allChunksSent =
+          false;
+      }
+
+      if (
+        config.TELEGRAM_SEND_DELAY_MS >
+        0
+      ) {
+        await delay(
+          config.TELEGRAM_SEND_DELAY_MS
+        );
       }
     }
 
-    if (!allChunksSent) return [];
+    if (
+      !allChunksSent
+    ) {
+      return [];
+    }
 
-    for (const root of summaryRoots) {
+    for (
+      const root
+      of summaryRoots
+    ) {
       await markNotificationSent(
         root.summaryKey,
         root.symbol,
@@ -590,45 +1124,95 @@ async function sendRootSummary(roots, scanType) {
     return summaryRoots;
   }
 
-  const unseenRoots = [];
+  const unseenRoots =
+    [];
 
-  for (const root of summaryRoots) {
-    const key = root.summaryKey;
-    if (await notificationWasSent(key)) continue;
+  for (
+    const root
+    of summaryRoots
+  ) {
+    const key =
+      root.summaryKey;
+
+    if (
+      await notificationWasSent(
+        key
+      )
+    ) {
+      continue;
+    }
+
     unseenRoots.push(root);
   }
 
-  if (unseenRoots.length === 0) {
-    const hourlyBucket = new Date().toISOString().slice(0, 13);
+  if (
+    unseenRoots.length === 0
+  ) {
+    const hourlyBucket =
+      new Date()
+        .toISOString()
+        .slice(0, 13);
+
     await sendTelegramBlock(
       'No new signals at this time interval.',
       `no-new-root:${scanType}:${hourlyBucket}`
     );
+
     return [];
   }
 
-  const chunks = formatSummaryTelegramChunks(unseenRoots);
-  const batchKey = `${scanType}:${unseenRoots
-    .map((root) => root.summaryKey)
-    .join('|')}`;
-
-  let allChunksSent = true;
-
-  for (let index = 0; index < chunks.length; index++) {
-    const result = await sendTelegramBlock(
-      chunks[index],
-      `${batchKey}:chunk:${index}`
+  const chunks =
+    formatSummaryTelegramChunks(
+      unseenRoots
     );
-    if (!result) allChunksSent = false;
 
-    if (config.TELEGRAM_SEND_DELAY_MS > 0) {
-      await delay(config.TELEGRAM_SEND_DELAY_MS);
+  const batchKey =
+    `${scanType}:${unseenRoots
+      .map(root =>
+        root.summaryKey
+      )
+      .join('|')}`;
+
+  let allChunksSent =
+    true;
+
+  for (
+    let index = 0;
+    index <
+    chunks.length;
+    index++
+  ) {
+    const result =
+      await sendTelegramBlock(
+        chunks[index],
+        `${batchKey}:chunk:${index}`
+      );
+
+    if (!result) {
+      allChunksSent =
+        false;
+    }
+
+    if (
+      config.TELEGRAM_SEND_DELAY_MS >
+      0
+    ) {
+      await delay(
+        config.TELEGRAM_SEND_DELAY_MS
+      );
     }
   }
 
-  if (!allChunksSent) return [];
+  if (
+    !allChunksSent
+  ) {
+    return [];
+  }
 
-  for (const root of unseenRoots) {
+  for (
+    const root
+    of unseenRoots
+  ) {
     await markNotificationSent(
       root.summaryKey,
       root.symbol,
@@ -640,162 +1224,359 @@ async function sendRootSummary(roots, scanType) {
   return unseenRoots;
 }
 
-async function collectCurrentRoots(symbolList) {
+async function collectCurrentRoots(
+  symbolList
+) {
   const roots = [];
 
-  for (const symbol of symbolList) {
+  for (
+    const symbol
+    of symbolList
+  ) {
     try {
-      const result = await getDailyRoot(symbol);
-      if (!result) continue;
+      const result =
+        await getDailyRoot(
+          symbol
+        );
+
+      if (!result) {
+        continue;
+      }
 
       roots.push({
         symbol,
-        dailyCandleTime: result.root.dailyCandleTime,
-        reason: result.root.reason
+        dailyCandleTime:
+          result.root
+            .dailyCandleTime,
+        reason:
+          result.root.reason
       });
     } catch (error) {
-      console.error(`Root scan failed for ${symbol}:`, error.message);
+      console.error(
+        `Root scan failed for ${symbol}:`,
+        error.message
+      );
     }
   }
 
   return roots;
 }
 
-async function dispatchRoots(roots) {
-  for (const root of roots) {
+async function dispatchRoots(
+  roots
+) {
+  for (
+    const root
+    of roots
+  ) {
     try {
-      const evaluated = await evaluateSymbol(root.symbol);
-      if (!evaluated) continue;
+      await evaluateSymbol(
+        root.symbol
+      );
 
-      if (config.TELEGRAM_SEND_DELAY_MS > 0) {
-        await delay(config.TELEGRAM_SEND_DELAY_MS);
+      if (
+        config.TELEGRAM_SEND_DELAY_MS >
+        0
+      ) {
+        await delay(
+          config.TELEGRAM_SEND_DELAY_MS
+        );
       }
     } catch (error) {
-      console.error(`MTF evaluation failed for ${root.symbol}:`, error.message);
+      console.error(
+        `MTF evaluation failed for ${root.symbol}:`,
+        error.message
+      );
     }
   }
 }
 
-async function runInitialScan(symbolList) {
-  batchScanRunning = true;
+async function runInitialScan(
+  symbolList
+) {
+  batchScanRunning =
+    true;
 
   try {
-    const roots = await collectCurrentRoots(symbolList);
-    await sendRootSummary(roots, 'startup');
-    await dispatchRoots(roots);
+    const roots =
+      await collectCurrentRoots(
+        symbolList
+      );
+
+    await sendRootSummary(
+      roots,
+      'startup'
+    );
+
+    await dispatchRoots(
+      roots
+    );
   } finally {
-    batchScanRunning = false;
+    batchScanRunning =
+      false;
   }
 }
 
 async function runBoundaryScan() {
-  if (boundaryScanRunning) return;
+  if (
+    boundaryScanRunning
+  ) {
+    return;
+  }
 
-  boundaryScanRunning = true;
-  batchScanRunning = true;
+  boundaryScanRunning =
+    true;
+
+  batchScanRunning =
+    true;
 
   try {
     marketDataCache.clear();
-    const roots = await collectCurrentRoots([...symbols]);
-    await sendRootSummary(roots, 'boundary');
-    await dispatchRoots(roots);
+
+    const roots =
+      await collectCurrentRoots(
+        [...symbols]
+      );
+
+    await sendRootSummary(
+      roots,
+      'boundary'
+    );
+
+    await dispatchRoots(
+      roots
+    );
   } catch (error) {
-    console.error('Boundary scan failed:', error);
+    console.error(
+      'Boundary scan failed:',
+      error
+    );
   } finally {
-    batchScanRunning = false;
-    boundaryScanRunning = false;
+    batchScanRunning =
+      false;
+
+    boundaryScanRunning =
+      false;
+
     await drainDeferredSymbols();
   }
 }
 
 async function drainDeferredSymbols() {
-  if (!startupReady || batchScanRunning || deferredSymbols.size === 0) return;
+  if (
+    !startupReady ||
+    batchScanRunning ||
+    deferredSymbols.size === 0
+  ) {
+    return;
+  }
 
-  const pending = [...deferredSymbols];
+  const pending =
+    [...deferredSymbols];
+
   deferredSymbols.clear();
 
-  for (const symbol of pending) {
-    void processSymbol(symbol);
+  for (
+    const symbol
+    of pending
+  ) {
+    void processSymbol(
+      symbol
+    );
   }
 }
 
 function resolveBoundaryScanTimeframe() {
-  const configuredMs = Number(
-    config.BOUNDARY_SCAN_INTERVAL_MS || 15 * 60 * 1000
-  );
+  const configuredMs =
+    Number(
+      config.BOUNDARY_SCAN_INTERVAL_MS ||
+      15 * 60 * 1000
+    );
 
-  const exact = Object.entries(BYBIT_TF_MS).find(
-    ([, ms]) => ms === configuredMs
-  );
-  if (exact) return exact[0];
+  const exact =
+    Object.entries(
+      BYBIT_TF_MS
+    ).find(
+      ([, ms]) =>
+        ms ===
+        configuredMs
+    );
 
-  const sorted = Object.entries(BYBIT_TF_MS).sort((a, b) => a[1] - b[1]);
-  for (const [tf, ms] of sorted) {
-    if (configuredMs <= ms) return tf;
+  if (exact) {
+    return exact[0];
+  }
+
+  const sorted =
+    Object.entries(
+      BYBIT_TF_MS
+    ).sort(
+      (a, b) =>
+        a[1] -
+        b[1]
+    );
+
+  for (
+    const [
+      tf,
+      ms
+    ]
+    of sorted
+  ) {
+    if (
+      configuredMs <=
+      ms
+    ) {
+      return tf;
+    }
   }
 
   return '15';
 }
 
-function nextWallClockBoundaryDelayMs(timeframe = '15') {
-  const intervalMs = BYBIT_TF_MS[String(timeframe)] || BYBIT_TF_MS['15'];
-  const now = Date.now();
-  const remainder = now % intervalMs;
+function nextWallClockBoundaryDelayMs(
+  timeframe = '15'
+) {
+  const intervalMs =
+    BYBIT_TF_MS[
+      String(timeframe)
+    ] ||
+    BYBIT_TF_MS['15'];
 
-  if (remainder === 0) {
-    return intervalMs + BOUNDARY_SETTLE_BUFFER_MS;
+  const now =
+    Date.now();
+
+  const remainder =
+    now %
+    intervalMs;
+
+  if (
+    remainder === 0
+  ) {
+    return (
+      intervalMs +
+      BOUNDARY_SETTLE_BUFFER_MS
+    );
   }
 
-  const nextBoundary = now + (intervalMs - remainder);
-  return Math.max(250, nextBoundary - now + BOUNDARY_SETTLE_BUFFER_MS);
+  const nextBoundary =
+    now +
+    (
+      intervalMs -
+      remainder
+    );
+
+  return Math.max(
+    250,
+    nextBoundary -
+      now +
+      BOUNDARY_SETTLE_BUFFER_MS
+  );
 }
 
 function scheduleNextBoundary() {
-  const timeframe = resolveBoundaryScanTimeframe();
+  const timeframe =
+    resolveBoundaryScanTimeframe();
 
-  const timer = setTimeout(async () => {
-    await runBoundaryScan();
-    scheduleNextBoundary();
-  }, nextWallClockBoundaryDelayMs(timeframe));
+  const timer =
+    setTimeout(
+      async () => {
+        await runBoundaryScan();
+        scheduleNextBoundary();
+      },
+      nextWallClockBoundaryDelayMs(
+        timeframe
+      )
+    );
 
   timer.unref?.();
 }
 
 async function performDailyCleanup() {
-  if (cleanupRunning) return;
+  if (
+    cleanupRunning
+  ) {
+    return;
+  }
 
-  const interval = Number(
-    config.DAILY_CLEANUP_INTERVAL_MS || 24 * 60 * 60 * 1000
-  );
+  const interval =
+    Number(
+      config.DAILY_CLEANUP_INTERVAL_MS ||
+      24 *
+        60 *
+        60 *
+        1000
+    );
 
-  if (Date.now() - lastCleanupAt < interval) return;
+  if (
+    Date.now() -
+      lastCleanupAt <
+    interval
+  ) {
+    return;
+  }
 
-  cleanupRunning = true;
+  cleanupRunning =
+    true;
 
   try {
     await purgeStaleCache();
-    if (typeof bybitWs.cleanupCache === 'function') {
-      bybitWs.cleanupCache(interval);
+
+    if (
+      typeof bybitWs.cleanupCache ===
+      'function'
+    ) {
+      bybitWs.cleanupCache(
+        interval
+      );
     }
-    lastCleanupAt = Date.now();
+
+    lastCleanupAt =
+      Date.now();
   } catch (error) {
-    console.error('Daily cache cleanup failed:', error);
+    console.error(
+      'Daily cache cleanup failed:',
+      error
+    );
   } finally {
-    cleanupRunning = false;
+    cleanupRunning =
+      false;
   }
 }
 
 async function syncOpenTradesFromMarket() {
-  const trades = await listOpenTrades();
+  const trades =
+    await listOpenTrades();
 
-  for (const trade of trades) {
+  for (
+    const trade
+    of trades
+  ) {
     try {
-      const marketData = await getMarketDataCached(trade.symbol);
-      const dailyCandles = await getCandles(trade.symbol, 'D');
-      const currentPrice = Number(marketData.lastPrice || 0);
+      const marketData =
+        await getMarketDataCached(
+          trade.symbol
+        );
 
-      if (currentPrice > 0) {
-        await updateTradeFromMarket(trade.symbol, currentPrice, dailyCandles);
+      const dailyCandles =
+        await getCandles(
+          trade.symbol,
+          'D'
+        );
+
+      const currentPrice =
+        Number(
+          marketData.lastPrice ||
+          0
+        );
+
+      if (
+        currentPrice > 0
+      ) {
+        await updateTradeFromMarket(
+          trade.symbol,
+          currentPrice,
+          dailyCandles
+        );
       }
     } catch (error) {
       console.error(
@@ -807,68 +1588,139 @@ async function syncOpenTradesFromMarket() {
 }
 
 async function replayBufferedKlines() {
-  const buffered = [...bufferedKlines.values()];
+  const buffered =
+    [
+      ...bufferedKlines.values()
+    ];
+
   bufferedKlines.clear();
 
-  for (const item of buffered) {
-    await saveKline(item.symbol, item.timeframe, item.candle);
+  for (
+    const item
+    of buffered
+  ) {
+    await saveKline(
+      item.symbol,
+      item.timeframe,
+      item.candle
+    );
   }
 }
 
-async function waitForWebSocketSnapshots(timeoutMs) {
-  const wait = Math.max(0, Number(timeoutMs || 0));
-  if (wait > 0) await delay(wait);
+async function waitForWebSocketSnapshots(
+  timeoutMs
+) {
+  const wait =
+    Math.max(
+      0,
+      Number(
+        timeoutMs ||
+        0
+      )
+    );
+
+  if (
+    wait > 0
+  ) {
+    await delay(wait);
+  }
 }
 
 async function bootstrapStrategy() {
-  if (bootstrapped) return;
-  bootstrapped = true;
+  if (
+    bootstrapped
+  ) {
+    return;
+  }
+
+  bootstrapped =
+    true;
 
   setupKeepAlive();
 
-  if (!config.USE_WS) {
+  if (
+    !config.USE_WS
+  ) {
     throw new Error(
       'This strategyEngine requires USE_WS=true for live operation.'
     );
   }
 
-  const symbolList = await discoverSymbols();
+  const symbolList =
+    await discoverSymbols();
 
-  bybitWs.on('kline', handleKline);
-  bybitWs.on('market', handleMarketUpdate);
+  bybitWs.on(
+    'kline',
+    handleKline
+  );
+
+  bybitWs.on(
+    'market',
+    handleMarketUpdate
+  );
+
   bybitWs.connect();
 
-  bybitWs.subscribe(symbolList, TIMEFRAMES);
+  bybitWs.subscribe(
+    symbolList,
+    TIMEFRAMES
+  );
 
-  seedingHistory = true;
+  seedingHistory =
+    true;
+
   try {
-    await seedHistoricalCandles(symbolList);
+    await seedHistoricalCandles(
+      symbolList
+    );
   } finally {
-    seedingHistory = false;
+    seedingHistory =
+      false;
   }
 
   await replayBufferedKlines();
-  await waitForWebSocketSnapshots(config.WS_INITIAL_SCAN_TIMEOUT);
 
-  await performDailyCleanup();
-  await runInitialScan(symbolList);
-
-  startupReady = true;
-  await drainDeferredSymbols();
-
-  const cleanupInterval = Number(
-    config.DAILY_CLEANUP_INTERVAL_MS || 24 * 60 * 60 * 1000
+  await waitForWebSocketSnapshots(
+    config.WS_INITIAL_SCAN_TIMEOUT
   );
 
-  if (cleanupInterval > 0) {
-    const cleanupTimer = setInterval(
-      () => void performDailyCleanup(),
-      cleanupInterval
+  await performDailyCleanup();
+
+  await runInitialScan(
+    symbolList
+  );
+
+  startupReady =
+    true;
+
+  await drainDeferredSymbols();
+
+  const cleanupInterval =
+    Number(
+      config.DAILY_CLEANUP_INTERVAL_MS ||
+      24 *
+        60 *
+        60 *
+        1000
     );
+
+  if (
+    cleanupInterval > 0
+  ) {
+    const cleanupTimer =
+      setInterval(
+        () => {
+          void performDailyCleanup();
+        },
+        cleanupInterval
+      );
+
     cleanupTimer.unref?.();
   }
 
-  if (isBoundaryScanEnabled()) {
+  if (
+    isBoundaryScanEnabled()
+  ) {
     scheduleNextBoundary();
   }
 }
@@ -876,7 +1728,8 @@ async function bootstrapStrategy() {
 module.exports = {
   bootstrapStrategy,
   performDailyCleanup,
-  evaluateAndDispatchSymbol: evaluateSymbol,
+  evaluateAndDispatchSymbol:
+    evaluateSymbol,
   syncOpenTradesFromMarket,
   runBoundaryScan
 };
