@@ -17,53 +17,82 @@ function getCurrentPrice(ticker, latestDailyCandle) {
   const tickerPrice = Number(ticker?.lastPrice || ticker?.last || 0);
   if (tickerPrice > 0) return tickerPrice;
 
-  return Number(latestDailyCandle?.close || latestDailyCandle?.open || 0);
+  return Number(
+    latestDailyCandle?.close ||
+    latestDailyCandle?.open ||
+    0
+  );
 }
 
 function detectStrictBullishDailyFlip(daily = []) {
-  if (!Array.isArray(daily) || daily.length < 27) return false;
-  const series = macdSeries(daily, { useOpenForLastCandle: true });
-  const histogram = Array.isArray(series?.histogram) ? series.histogram : [];
-  if (histogram.length < 2) return false;
+  if (!Array.isArray(daily) || daily.length < 27) {
+    return false;
+  }
 
-  const prev = Number(histogram[histogram.length - 2]);
-  const curr = Number(histogram[histogram.length - 1]);
+  const { histogram } = macdSeries(daily, {
+    useOpenForLastCandle: true
+  });
 
-  return Number.isFinite(prev) && Number.isFinite(curr) && prev < 0 && curr > 0;
+  if (histogram.length < 2) {
+    return false;
+  }
+
+  const previous = histogram[histogram.length - 2];
+  const current = histogram[histogram.length - 1];
+
+  return (
+    Number.isFinite(previous) &&
+    Number.isFinite(current) &&
+    previous < 0 &&
+    current > 0
+  );
 }
 
 function evaluateDailyRootCriteria(daily = [], ticker = {}) {
-  if (!Array.isArray(daily) || daily.length < 8) return null;
+  if (!Array.isArray(daily) || daily.length < 8) {
+    return null;
+  }
 
   const latest = daily[daily.length - 1];
-  const currentOpen = Number(latest?.open ?? latest?.o ?? 0);
+  const currentOpen = Number(latest?.open || 0);
   const currentPrice = getCurrentPrice(ticker, latest);
+
   const recentCloses = daily
     .slice(-8, -1)
-    .map((candle) => Number(candle?.close ?? candle?.c ?? 0));
+    .map(candle => Number(candle.close || 0));
 
-  if (recentCloses.length < 7 || currentOpen <= 0 || currentPrice <= 0) {
+  if (
+    recentCloses.length < 7 ||
+    currentOpen <= 0 ||
+    currentPrice <= 0
+  ) {
     return null;
   }
 
   const ma7 = sma(recentCloses, 7);
-  const openAndPriceAboveMa7 = currentOpen > ma7 && currentPrice > ma7;
+  const openAndPriceAboveMa7 =
+    currentOpen > ma7 &&
+    currentPrice > ma7;
+
   const positiveFlip = detectStrictBullishDailyFlip(daily);
 
-  if (!openAndPriceAboveMa7 && !positiveFlip) return null;
+  if (!openAndPriceAboveMa7 && !positiveFlip) {
+    return null;
+  }
 
   let reason =
     '1D open-candle histogram flipped positive after prior closed candle was negative';
+
   if (openAndPriceAboveMa7 && positiveFlip) {
-    reason = '1D open and current price above 7MA with positive hist flip';
+    reason =
+      '1D open and current price above 7MA with positive hist flip';
   } else if (openAndPriceAboveMa7) {
     reason = '1D open and current price above 7MA';
   }
 
   return {
     symbol: ticker.symbol || null,
-    dailyCandleTime:
-      Number(latest?.open_time || latest?.start || latest?.t || 0) || null,
+    dailyCandleTime: Number(latest?.open_time || 0) || null,
     currentOpen,
     currentPrice,
     ma7,
@@ -78,8 +107,14 @@ function detectDailyRootSignal(daily = [], ticker = {}) {
 }
 
 async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
-  const daily = Array.isArray(candlesByTf.D) ? candlesByTf.D : [];
-  const rootCriteria = evaluateDailyRootCriteria(daily, { ...ticker, symbol });
+  const daily = Array.isArray(candlesByTf.D)
+    ? candlesByTf.D
+    : [];
+
+  const rootCriteria = evaluateDailyRootCriteria(daily, {
+    ...ticker,
+    symbol
+  });
 
   if (!rootCriteria) {
     lastMtfSnapshots.delete(symbol);
@@ -95,17 +130,20 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
     reason
   } = rootCriteria;
 
-  const currentDailyHistogram = Number(
-    macdHistogram(daily, { useOpenForLastCandle: true })
-  );
+  const currentDailyHistogram = macdHistogram(daily, {
+    useOpenForLastCandle: true
+  });
+
   const dailyHistogramDirection =
-    Number.isFinite(currentDailyHistogram) && currentDailyHistogram > 0
+    currentDailyHistogram > 0
       ? 'bullish'
-      : Number.isFinite(currentDailyHistogram) && currentDailyHistogram < 0
+      : currentDailyHistogram < 0
         ? 'negative'
         : 'neutral';
 
-  const prevSnapshot = lastMtfSnapshots.get(symbol) || null;
+  const previousSnapshot =
+    lastMtfSnapshots.get(symbol) || null;
+
   const mtf = evaluateMtfAlignment(
     {
       '5': candlesByTf['5'] || [],
@@ -113,14 +151,14 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
       '60': candlesByTf['60'] || [],
       '240': candlesByTf['240'] || []
     },
-    prevSnapshot
+    previousSnapshot
   );
 
   lastMtfSnapshots.set(symbol, {
     aligned: mtf.aligned,
     values: { ...mtf.values },
     candleTimes: { ...mtf.candleTimes },
-    flipCandleTimes: { ...mtf.flipCandleTimes }
+    activeOpenPrices: { ...mtf.activeOpenPrices }
   });
 
   let liquidity = {
@@ -131,7 +169,10 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
   try {
     const { totalEquityUsd } = await getAccountEquity();
 
-    if (Number.isFinite(totalEquityUsd) && totalEquityUsd > 0) {
+    if (
+      Number.isFinite(totalEquityUsd) &&
+      totalEquityUsd > 0
+    ) {
       const targetPositionUsd =
         (totalEquityUsd * liquidityConfig.riskPercentage) /
         liquidityConfig.stopLossPercentage;
@@ -140,9 +181,16 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
         {
           symbol,
           lastPrice: currentPrice,
-          volume24hUsd: Number(ticker?.volume24hUsd || ticker?.turnover24h || 0),
+          volume24hUsd: Number(
+            ticker?.volume24hUsd ||
+            ticker?.turnover24h ||
+            0
+          ),
           spreadPct: Number(ticker?.spreadPct || 0),
-          topOfBookDepthUsd: Number(ticker?.topOfBookDepthUsd || 0)
+          topOfBookDepthUsd: Number(
+            ticker?.topOfBookDepthUsd ||
+            0
+          )
         },
         targetPositionUsd
       );
@@ -179,35 +227,54 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 
   const numericTvScore = Number(tvRating?.score);
   const numericTvPercent = Number(tvRating?.percent);
+
   const tvAvailable =
-    tvRating?.available === true && Number.isFinite(numericTvScore);
+    tvRating?.available === true &&
+    Number.isFinite(numericTvScore);
 
   const previousState = await getMtfState(symbol, 'D');
-  const decision = mtf.aligned && liquidity.valid ? 'accept' : 'monitor';
 
-  const dailyRootTriggered = positiveFlip || openAndPriceAboveMa7;
-  const dailyFlipLabel = positiveFlip ? '1D' : '1D (7MA)';
+  const decision =
+    mtf.aligned && liquidity.valid
+      ? 'accept'
+      : 'monitor';
+
+  const dailyRootTriggered =
+    positiveFlip || openAndPriceAboveMa7;
+
+  const dailyFlipLabel =
+    positiveFlip ? '1D' : '1D (7MA)';
 
   const latestFlippedTf =
     mtf.latestFlippedBullishTimeframe ||
     (dailyRootTriggered ? dailyFlipLabel : null);
+
   const latestFlipTime =
     mtf.latestFlipCandleTime ||
-    (dailyRootTriggered
-      ? Number(latestDailyCandle?.open_time || latestDailyCandle?.start || 0) || null
-      : null);
+    (
+      dailyRootTriggered
+        ? Number(latestDailyCandle?.open_time || 0) || null
+        : null
+    );
+
+  const latestFlipOpenPrice =
+    mtf.latestFlipOpenPrice ||
+    (
+      dailyRootTriggered
+        ? Number(latestDailyCandle?.open || 0) || null
+        : null
+    );
 
   const signal = {
     symbol,
     timeframe: 'D',
     dailyCandleTime:
-      Number(latestDailyCandle?.open_time || latestDailyCandle?.start || 0) || null,
+      Number(latestDailyCandle?.open_time || 0) ||
+      null,
     decision,
     reason,
 
-    dailyHistogram: Number.isFinite(currentDailyHistogram)
-      ? currentDailyHistogram
-      : 0,
+    dailyHistogram: currentDailyHistogram,
     dailyHistogramDirection,
     macdFlip: positiveFlip,
     openAboveMa7: openAndPriceAboveMa7,
@@ -218,28 +285,43 @@ async function evaluateSignal(symbol, candlesByTf = {}, ticker = {}) {
 
     tvScore: tvAvailable ? numericTvScore : null,
     tvScorePercent:
-      tvAvailable && Number.isFinite(numericTvPercent) ? numericTvPercent : null,
-    tvScoreLabel: tvAvailable ? tvRating.label || 'unrated' : 'N/A',
+      tvAvailable &&
+      Number.isFinite(numericTvPercent)
+        ? numericTvPercent
+        : null,
+    tvScoreLabel:
+      tvAvailable
+        ? tvRating.label || 'unrated'
+        : 'N/A',
     tvScoreAvailable: tvAvailable,
 
     mtfStatus: mtf.status,
     mtfValues: mtf.values,
     mtfPreviousValues: mtf.previousValues,
     mtfHistogramValues: mtf.histogramValues,
-    mtfPreviousHistogramValues: mtf.previousHistogramValues,
+    mtfPreviousHistogramValues:
+      mtf.previousHistogramValues,
     mtfAligned: mtf.aligned,
     mtfAlignmentFlip: mtf.alignmentFlip,
     mtfFlippedBullish: mtf.flippedBullish,
+    mtfFlipCandleTimes: mtf.flipCandleTimes,
+    mtfFlipOpenPrices: mtf.flipOpenPrices,
     latestFlippedBullishTimeframe: latestFlippedTf,
     mtfLatestFlippedBullish: latestFlippedTf,
     mtfLatestFlipCandleTime: latestFlipTime,
+    mtfLatestFlipOpenPrice: latestFlipOpenPrice,
 
-    status: decision === 'accept' ? 'new' : 'monitor',
+    status:
+      decision === 'accept'
+        ? 'new'
+        : 'monitor',
+
     price: currentPrice,
     liquidity,
 
     mtfTransition:
-      previousState?.state && previousState.state !== mtf.status
+      previousState?.state &&
+      previousState.state !== mtf.status
         ? `${previousState.state}->${mtf.status}`
         : 'stable'
   };
