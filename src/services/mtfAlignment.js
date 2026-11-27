@@ -33,7 +33,10 @@ function getLastCandleTime(candles) {
   if (!last) return null;
 
   return normalizeEpochMs(
-    last.open_time ?? last.start ?? last.t ?? last.timestamp
+    last.open_time ??
+    last.start ??
+    last.t ??
+    last.timestamp
   );
 }
 
@@ -68,10 +71,10 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
       ? candlesByTf[timeframe]
       : [];
 
-    // Evaluate the active candle at open and the previous closed candle at close.
     const currentHistogram = getHistogram(candles, {
       useOpenForLastCandle: true
     });
+
     const previousHistogram =
       candles.length >= 27
         ? getHistogram(candles.slice(0, -1), {
@@ -91,8 +94,6 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     candleTimes[timeframe] = lastCandleTime;
     activeOpenPrices[timeframe] = activeOpenPrice;
 
-    // A real flip requires a strictly negative previous closed candle
-    // followed by a strictly positive active candle evaluated at its open.
     const candleLevelFlip =
       previousHistogram !== null &&
       previousHistogram < 0 &&
@@ -118,16 +119,22 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     (timeframe) => values[timeframe] === 'neutral'
   ).length;
 
-  const aligned = bullishCount === REQUIRED_MTF_TFS.length;
-  const wasPreviouslyAligned = previousSnapshot?.aligned === true;
+  const aligned =
+    bullishCount === REQUIRED_MTF_TFS.length;
+
+  const wasPreviouslyAligned =
+    previousSnapshot?.aligned === true;
 
   let status = 'mixed';
-  if (aligned) status = 'bullish';
-  else if (negativeCount === REQUIRED_MTF_TFS.length) status = 'negative';
-  else if (neutralCount === REQUIRED_MTF_TFS.length) status = 'neutral';
 
-  // Pick the timeframe whose active candle crossed most recently.
-  // Use its candle open time and, then, timeframe order as tie-breakers.
+  if (aligned) {
+    status = 'bullish';
+  } else if (negativeCount === REQUIRED_MTF_TFS.length) {
+    status = 'negative';
+  } else if (neutralCount === REQUIRED_MTF_TFS.length) {
+    status = 'neutral';
+  }
+
   const latestFlippedBullish =
     flippedBullish
       .map((timeframe) => ({
@@ -139,10 +146,13 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
         if ((b.candleTime || 0) !== (a.candleTime || 0)) {
           return (b.candleTime || 0) - (a.candleTime || 0);
         }
-        return (TF_ORDER[b.timeframe] || 0) - (TF_ORDER[a.timeframe] || 0);
+
+        return (
+          (TF_ORDER[b.timeframe] || 0) -
+          (TF_ORDER[a.timeframe] || 0)
+        );
       })[0] || null;
 
-  // Alignment completion is separate from the candle-level flip.
   const alignmentFlip =
     aligned &&
     !wasPreviouslyAligned &&
@@ -161,9 +171,12 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     flippedBullish,
     flipCandleTimes,
     flipOpenPrices,
-    latestFlippedBullishTimeframe: latestFlippedBullish?.timeframe || null,
-    latestFlipCandleTime: latestFlippedBullish?.candleTime || null,
-    latestFlipOpenPrice: latestFlippedBullish?.openPrice || null,
+    latestFlippedBullishTimeframe:
+      latestFlippedBullish?.timeframe || null,
+    latestFlipCandleTime:
+      latestFlippedBullish?.candleTime || null,
+    latestFlipOpenPrice:
+      latestFlippedBullish?.openPrice || null,
     bullish: bullishCount,
     negative: negativeCount,
     neutral: neutralCount
