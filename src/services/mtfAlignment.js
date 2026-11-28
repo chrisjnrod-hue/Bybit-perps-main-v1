@@ -71,10 +71,13 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
       ? candlesByTf[timeframe]
       : [];
 
+    // Active candle: calculate MACD with its open price.
     const currentHistogram = getHistogram(candles, {
       useOpenForLastCandle: true
     });
 
+    // Previous candle: exclude the active candle and calculate it entirely
+    // from its historical closed values.
     const previousHistogram =
       candles.length >= 27
         ? getHistogram(candles.slice(0, -1), {
@@ -94,6 +97,7 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     candleTimes[timeframe] = lastCandleTime;
     activeOpenPrices[timeframe] = activeOpenPrice;
 
+    // Strict closed-to-open flip used for the timeframe completing alignment.
     const candleLevelFlip =
       previousHistogram !== null &&
       previousHistogram < 0 &&
@@ -135,8 +139,17 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     status = 'neutral';
   }
 
+  /*
+   * Only strict candle-level flips from timeframes that are themselves
+   * bullish may complete alignment. Already-positive timeframes that did
+   * not flip are not completing timeframes.
+   */
+  const completingFlips = flippedBullish.filter(
+    (timeframe) => values[timeframe] === 'bullish'
+  );
+
   const latestFlippedBullish =
-    flippedBullish
+    completingFlips
       .map((timeframe) => ({
         timeframe,
         candleTime: flipCandleTimes[timeframe],
@@ -153,6 +166,12 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
         );
       })[0] || null;
 
+  /*
+   * A completing cycle requires:
+   * 1. all four timeframes currently bullish;
+   * 2. previous evaluation was not fully aligned;
+   * 3. at least one currently bullish timeframe strict-flipped this evaluation.
+   */
   const alignmentFlip =
     aligned &&
     !wasPreviouslyAligned &&
@@ -169,6 +188,7 @@ function evaluateMtfAlignment(candlesByTf = {}, previousSnapshot = null) {
     aligned,
     alignmentFlip,
     flippedBullish,
+    completingFlips,
     flipCandleTimes,
     flipOpenPrices,
     latestFlippedBullishTimeframe:
